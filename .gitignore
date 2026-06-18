@@ -1,0 +1,48 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.env.txt
+
+# Dependencies
+node_modules/
+.pnp.*
+
+# Build output
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Prisma generated client
+**/node_modules/.prisma/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Expo / React Native
+.expo/
+.expo-shared/
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Misc
+coverage/
+.turbo/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Scratch/debug screenshots at app root (real icons live in assets/)
+apps/mobile/*.png

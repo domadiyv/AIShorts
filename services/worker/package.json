@@ -1,0 +1,26 @@
+{
+  "name": "@aishorts/worker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "ingest": "dotenv -e ../../.env -- tsx src/index.ts",
+    "ingest:only": "dotenv -e ../../.env -- tsx src/ingest.ts",
+    "summarize:only": "dotenv -e ../../.env -- tsx src/summarize.ts",
+    "check": "dotenv -e ../../.env -- tsx src/check.ts",
+    "reset:drafts": "dotenv -e ../../.env -- tsx src/reset.ts",
+    "normalize": "dotenv -e ../../.env -- tsx src/normalize.ts",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@aishorts/shared": "*",
+    "@anthropic-ai/sdk": "^0.104.1",
+    "@extractus/article-extractor": "^8.1.0",
+    "rss-parser": "^3.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "dotenv-cli": "^8.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@aishorts/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "dotenv -e ../../.env -- tsx watch src/server.ts",
+    "start": "dotenv -e ../../.env -- tsx src/server.ts",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@aishorts/shared": "*",
+    "@fastify/cors": "^11.2.0",
+    "@upstash/redis": "^1.38.0",
+    "fastify": "^5.8.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "dotenv-cli": "^8.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

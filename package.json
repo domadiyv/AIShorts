@@ -1,0 +1,21 @@
+{
+  "name": "aishorts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AIShorts — Inshorts-style daily AI news & learning in ~60-word cards.",
+  "workspaces": [
+    "packages/*",
+    "services/*",
+    "apps/admin"
+  ],
+  "scripts": {
+    "db:generate": "npm run -w @aishorts/shared db:generate",
+    "db:migrate": "npm run -w @aishorts/shared db:migrate",
+    "db:studio": "npm run -w @aishorts/shared db:studio",
+    "worker:ingest": "npm run -w @aishorts/worker ingest",
+    "api:dev": "npm run -w @aishorts/api dev"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,158 @@
+// AIShorts data model. See build plan for rationale.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CardStatus {
+  pending
+  published
+  rejected
+}
+
+enum Difficulty {
+  beginner
+  intermediate
+  advanced
+}
+
+enum CardType {
+  news
+  lesson
+}
+
+enum SourceType {
+  rss
+  api
+  manual
+}
+
+// A content source we ingest from (RSS feed, API, or manual).
+model Source {
+  id        String     @id @default(cuid())
+  name      String
+  type      SourceType @default(rss)
+  url       String     @unique
+  trusted   Boolean    @default(false)
+  active    Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  rawItems  RawItem[]
+
+  @@map("sources")
+}
+
+// A raw fetched article before summarization.
+model RawItem {
+  id          String    @id @default(cuid())
+  source      Source?   @relation(fields: [sourceId], references: [id])
+  sourceId    String?
+  sourceName  String
+  sourceUrl   String // original article URL
+  externalId  String? // guid from the feed, if any
+  title       String
+  rawText     String?
+  hash        String    @unique // normalized url/title, for dedup
+  clusterId   String? // near-duplicate cluster (one card per event)
+  imageUrl    String?
+  publishedAt DateTime?
+  fetchedAt   DateTime  @default(now())
+  processedAt DateTime?
+  card        Card?
+
+  @@index([clusterId])
+  @@index([processedAt])
+  @@map("raw_items")
+}
+
+// A ~60-word card (news now, lesson in v2).
+model Card {
+  id           String      @id @default(cuid())
+  type         CardType    @default(news)
+  title        String
+  summary      String
+  whyItMatters String?
+  category     String
+  difficulty   Difficulty  @default(beginner)
+  tags         String[]
+  imageUrl     String?
+  sourceName   String
+  sourceUrl    String
+  status       CardStatus  @default(pending)
+  rawItem      RawItem?    @relation(fields: [rawItemId], references: [id])
+  rawItemId    String?     @unique
+  publishedAt  DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  bookmarks    Bookmark[]
+  events       CardEvent[]
+
+  @@index([status, publishedAt])
+  @@index([category])
+  @@index([difficulty])
+  @@map("cards")
+}
+
+model User {
+  id        String     @id @default(cuid())
+  email     String?    @unique
+  createdAt DateTime   @default(now())
+  bookmarks Bookmark[]
+  devices   Device[]
+
+  @@map("users")
+}
+
+model Device {
+  id            String   @id @default(cuid())
+  user          User?    @relation(fields: [userId], references: [id])
+  userId        String?
+  expoPushToken String?  @unique
+  digestHour    Int? // 0-23, user's local hour for the daily digest
+  categories    String[]
+  createdAt     DateTime @default(now())
+
+  @@map("devices")
+}
+
+model Bookmark {
+  id        String   @id @default(cuid())
+  user      User?    @relation(fields: [userId], references: [id])
+  userId    String?
+  deviceId  String? // for anonymous (device-token) bookmarks
+  card      Card     @relation(fields: [cardId], references: [id])
+  cardId    String
+  createdAt DateTime @default(now())
+
+  @@unique([deviceId, cardId])
+  @@map("bookmarks")
+}
+
+// Newsletter subscriber (validation layer).
+model Subscriber {
+  id         String   @id @default(cuid())
+  email      String   @unique
+  status     String   @default("active") // active | unsubscribed
+  categories String[]
+  createdAt  DateTime @default(now())
+
+  @@map("subscribers")
+}
+
+// Engagement events powering analytics + ranking.
+model CardEvent {
+  id        String   @id @default(cuid())
+  card      Card     @relation(fields: [cardId], references: [id])
+  cardId    String
+  type      String // view | read_more | share | bookmark | email_open | email_click
+  deviceId  String?
+  userId    String?
+  createdAt DateTime @default(now())
+
+  @@index([cardId, type])
+  @@index([createdAt])
+  @@map("card_events")
+}
