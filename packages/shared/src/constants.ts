@@ -15,3 +15,14 @@ export type DifficultyLevel = (typeof DIFFICULTIES)[number];
 
 // Target word count for a card summary (Inshorts-style brevity).
 export const SUMMARY_WORD_TARGET = { min: 50, max: 65 } as const;
+
+// Engagement event types accepted by POST /v1/events.
+export const EVENT_TYPES = [
+  'view',
+  'read_more',
+  'share',
+  'bookmark',
+  'email_open',
+  'email_click',
+] as const;
+export type EventType = (typeof EVENT_TYPES)[number];

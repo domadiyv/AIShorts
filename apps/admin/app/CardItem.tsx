@@ -17,16 +17,27 @@ type Action = (fd: FormData) => Promise<void>;
 
 export function CardItem({
   card,
+  categories,
+  difficulties,
   approveCard,
   rejectCard,
   saveCard,
 }: {
   card: Card;
+  categories: readonly string[];
+  difficulties: readonly string[];
   approveCard: Action;
   rejectCard: Action;
   saveCard: Action;
 }) {
   const words = card.summary.trim().split(/\s+/).filter(Boolean).length;
+  // Keep non-canonical legacy values visible instead of silently coercing them.
+  const categoryOpts = categories.includes(card.category)
+    ? categories
+    : [card.category, ...categories];
+  const difficultyOpts = difficulties.includes(card.difficulty)
+    ? difficulties
+    : [card.difficulty, ...difficulties];
   return (
     <form className="card">
       <input type="hidden" name="id" value={card.id} />
@@ -40,8 +51,20 @@ export function CardItem({
       <textarea name="summary" defaultValue={card.summary} />
       <input name="whyItMatters" defaultValue={card.whyItMatters ?? ''} placeholder="Why it matters" />
       <div className="row">
-        <input name="category" defaultValue={card.category} style={{ maxWidth: 160 }} />
-        <input name="difficulty" defaultValue={card.difficulty} style={{ maxWidth: 160 }} />
+        <select name="category" defaultValue={card.category} style={{ maxWidth: 160 }}>
+          {categoryOpts.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+        <select name="difficulty" defaultValue={card.difficulty} style={{ maxWidth: 160 }}>
+          {difficultyOpts.map((d) => (
+            <option key={d} value={d}>
+              {d}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="src">{card.sourceUrl}</div>
       <div className="row">

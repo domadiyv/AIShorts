@@ -17,7 +17,7 @@ h1 { font-size: 22px; margin: 0 0 4px; }
 .pill.diff-beginner { background: #14351f; color: #7ee2a8; }
 .pill.diff-intermediate { background: #2e2a12; color: #e8d27a; }
 .pill.diff-advanced { background: #34161b; color: #f0938f; }
-.card input, .card textarea {
+.card input, .card textarea, .card select {
   width: 100%; background: #0f1115; color: #e8eaed; border: 1px solid #2a2e37;
   border-radius: 8px; padding: 8px 10px; font-size: 14px; margin-bottom: 8px; font-family: inherit;
 }

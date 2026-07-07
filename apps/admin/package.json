@@ -8,6 +8,7 @@
     "start": "dotenv -e ../../.env -- next start -p 4001"
   },
   "dependencies": {
+    "@aishorts/shared": "*",
     "next": "^16.2.9",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"

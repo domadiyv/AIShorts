@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "-w", "@aishorts/admin", "dev"],
       "port": 4001
+    },
+    {
+      "name": "api",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "-w", "@aishorts/api", "start"],
+      "port": 4000
     }
   ]
 }

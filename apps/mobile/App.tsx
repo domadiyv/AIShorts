@@ -127,15 +127,19 @@ function Feed() {
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const res = await fetchFeed({ category, difficulty });
-      setCards(res.cards);
-      setNextCursor(res.nextCursor);
+      if (tab === 'saved') {
+        setBookmarks(await getBookmarks());
+      } else {
+        const res = await fetchFeed({ category, difficulty });
+        setCards(res.cards);
+        setNextCursor(res.nextCursor);
+      }
     } catch {
       /* keep existing */
     } finally {
       setRefreshing(false);
     }
-  }, [category, difficulty]);
+  }, [tab, category, difficulty]);
 
   const loadMore = useCallback(async () => {
     if (tab !== 'feed' || !nextCursor || loadingMore) return;

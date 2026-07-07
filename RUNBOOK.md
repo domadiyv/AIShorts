@@ -56,7 +56,7 @@ Monorepo at `D:\Claude\AiShorts` (npm workspaces). Committed: `c0150d0` "Initial
 | API server | `services/api` | ✅ **Fastify @ :4000** — feed (cursor + category/difficulty filters), search, categories, subscribers, events, **token-guarded admin** (approve/reject/edit); Upstash Redis cache. Verified live. |
 | Admin panel | `apps/admin` | ✅ **Next.js @ :4001** — review/approve/edit cards; installable **PWA**. Verified. |
 | Public web feed | `apps/web` | ❌ **Removed** (we went mobile-first) |
-| Mobile app | `apps/mobile` | ✅ **Built** — Expo (**SDK 55**), swipe feed, category/difficulty filters, bookmarks, read-more. Bundles clean. **Running it on a device is the open problem — see §7.** |
+| Mobile app | `apps/mobile` | ✅ **Built** — Expo (**SDK 54** — must match the phone's store Expo Go, see §6.13), swipe feed, category/difficulty filters, bookmarks, read-more. Bundles clean. |
 
 **Content in the database:** ~**31 published cards** + ~1,091 raw articles in Neon.
 
@@ -97,7 +97,9 @@ Machine facts:
 9. **Android emulator wouldn't start: "Not enough disk space"** → `C:` was full (0.7 GB) → **moved the 10 GB AVD to `D:`** (freed C:). ✅
 10. **Emulator app showed "No cards"** → `10.0.2.2` NAT route was **firewall-blocked** → switched app to **`127.0.0.1` via `adb reverse`** (firewall-proof) → **app rendered real cards. VERIFIED with a screenshot on the Android emulator.** ✅
 11. **Android emulator NOT viable on this machine (re-verified 2026-06-17).** Two compounding causes: (a) **no hardware acceleration** — `accel: 0` because Hyper-V holds the hypervisor (so it runs software-slow); (b) **8 GB total RAM** — the emulator alone uses ~0.9 GB and dropped free RAM to **0.4 GB**, so **Metro (~1 GB) cannot start alongside it**. With the emulator OFF, ~2.6 GB frees up and Metro starts fine. **Conclusion: this PC cannot run the emulator + Metro together.** Use a physical device instead (§7B). ❌
-12. **iPhone + Expo Go — root cause IDENTIFIED (2026-06-17), fix not yet device-confirmed.** Two compounding problems: (a) **SDK mismatch** — FIXED: project pinned to **SDK 55**, the current store Expo Go (PROVEN working against Expo Go 55.0.7 on the Android emulator). (b) **Windows Firewall** blocks the iPhone from reaching Metro (8081) + API (4000) over the LAN — there is no inbound allow rule. FIX = open the firewall (§7B step 0) + same Wi-Fi + LAN API URL. Both known blockers are now addressed; remaining is your firewall command + scan.
+12. **iPhone + Expo Go — root cause IDENTIFIED (2026-06-17), fix not yet device-confirmed.** Two compounding problems: (a) **SDK mismatch** — FIXED: project pinned to **SDK 55**, the current store Expo Go (PROVEN working against Expo Go 55.0.7 on the Android emulator). (b) **Windows Firewall** blocks the iPhone from reaching Metro (8081) + API (4000) over the LAN — there is no inbound allow rule. FIX = open the firewall (§7B step 0) + same Wi-Fi + LAN API URL. Both known blockers are now addressed; remaining is your firewall command + scan. ⚠️ **The SDK-55 pin was WRONG — see issue 13 for the real story.**
+13. **"Project is incompatible with this version of Expo Go" — TRUE root cause found 2026-07-07.** The iPhone's **App Store Expo Go is pinned at SDK 54** (client 54.0.7; the Play Store one is likewise stuck at 54.0.8, May 2026). Expo published newer Expo Go clients (55/56/57) but they never shipped to the app stores — they exist only via expo.dev/go (Android APK sideload; **no iOS option at all**). So the June "pin to SDK 55" could never fix the iPhone: 55 ≠ 54. The emulator worked in June only because it had a sideloaded/dev Expo Go 55.0.7. **FIX (applied 2026-07-07): project downgraded to SDK 54** (`npm install expo@sdk-54` + `npx expo install --fix`; now expo 54.0.35 / RN 0.81.5 / React 19.1). Typecheck + iOS bundle export verified clean. **RULE: before ever changing the project SDK, open Expo Go on the actual phone → App info → "supported sdk" — the project MUST match that number exactly.** Firewall rule "AIShorts dev" (8081, 4000) confirmed created 2026-07-06.
+14. **Phone shows "Could not connect to the server. exp://127.0.0.1:8081" (2026-07-07).** Metro advertised `127.0.0.1` instead of the LAN IP: Expo's IP autodetection fails on this PC (6 network adapters, 5 dead `169.254.*` link-local ones) and falls back to localhost, which a phone can never reach. **FIX (applied + verified): `REACT_NATIVE_PACKAGER_HOSTNAME=192.168.1.180` added to `apps/mobile/.env`** — Expo CLI loads it on every start; manifest verified to advertise `192.168.1.180:8081`. If the PC's Wi-Fi IP ever changes, update BOTH lines in that .env.
 
 ---
 
@@ -134,7 +136,7 @@ published cards across reboots, so the feed has content immediately.
 | Route | Status | Verdict |
 |---|---|---|
 | **Android emulator (this PC)** | ❌ Not viable | 8 GB RAM can't run emulator + Metro together; no HW accel (§6.11). |
-| **iPhone via Expo Go (LAN)** | ✅ **Recommended** — PC side verified ready | SDK now matches Expo Go; needs firewall (step 0) + scan. |
+| **iPhone via Expo Go (LAN)** | ✅ **Recommended** — PC side verified ready | Project SDK 54 = App Store Expo Go SDK 54 (§6.13); firewall rule created 2026-07-06. |
 | **Physical Android phone (USB)** | ✅ High confidence, untested | If you get any Android phone: no RAM/firewall issues. |
 | **Standalone EAS build** | Bulletproof, not set up | Android APK free (needs an Android phone); iOS needs $99 Apple Developer. |
 

@@ -1,13 +1,20 @@
-import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
+import { timingSafeEqual } from 'node:crypto';
+import Fastify, {
+  type FastifyError,
+  type FastifyReply,
+  type FastifyRequest,
+} from 'fastify';
 import cors from '@fastify/cors';
 import {
   prisma,
   CATEGORIES,
   DIFFICULTIES,
   subscribeSchema,
+  cardUpdateSchema,
+  cardEventSchema,
   type FeedCard,
 } from '@aishorts/shared';
-import { cacheGet, cacheSet } from './redis';
+import { cacheGet, cacheSet, feedCacheVersion, bumpFeedCacheVersion } from './redis';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? '';
@@ -31,18 +38,43 @@ function toFeedCard(c: NonNullable<CardRow>): FeedCard {
   };
 }
 
+// Constant-time token comparison — a plain !== leaks length/prefix timing.
+function tokenMatches(candidate: unknown): boolean {
+  if (!ADMIN_TOKEN || typeof candidate !== 'string') return false;
+  const a = Buffer.from(candidate);
+  const b = Buffer.from(ADMIN_TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 // Reject requests to /v1/admin/* without the shared admin token.
 function requireAdmin(req: FastifyRequest, reply: FastifyReply, done: () => void) {
-  if (!ADMIN_TOKEN || req.headers['x-admin-token'] !== ADMIN_TOKEN) {
+  if (!tokenMatches(req.headers['x-admin-token'])) {
     reply.code(401).send({ error: 'unauthorized' });
     return;
   }
   done();
 }
 
+// Prisma error code, if this is a known Prisma request error.
+function prismaCode(err: unknown): string | undefined {
+  return typeof err === 'object' && err !== null && 'code' in err
+    ? String((err as { code: unknown }).code)
+    : undefined;
+}
+
 async function build() {
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
+
+  // Never echo internal error details (Prisma queries, file paths) to clients.
+  app.setErrorHandler((err: FastifyError, req, reply) => {
+    if (err.statusCode && err.statusCode < 500) {
+      reply.code(err.statusCode).send({ error: err.message });
+      return;
+    }
+    req.log.error(err);
+    reply.code(500).send({ error: 'internal_error' });
+  });
 
   app.get('/v1/health', async () => ({ ok: true, time: new Date().toISOString() }));
 
@@ -59,7 +91,8 @@ async function build() {
     const difficulty = DIFFICULTIES.includes(q.difficulty as never) ? q.difficulty : undefined;
     const cursor = q.cursor || undefined;
 
-    const cacheKey = `feed:${category ?? '*'}:${difficulty ?? '*'}:${cursor ?? '0'}:${limit}`;
+    const ver = await feedCacheVersion();
+    const cacheKey = `feed:v${ver}:${category ?? '*'}:${difficulty ?? '*'}:${cursor ?? '0'}:${limit}`;
     const cached = await cacheGet<{ cards: FeedCard[]; nextCursor: string | null }>(cacheKey);
     if (cached) return cached;
 
@@ -124,11 +157,16 @@ async function build() {
 
   // Lightweight analytics event (view/read_more/share/bookmark/...).
   app.post('/v1/events', async (req, reply) => {
-    const b = req.body as { cardId?: string; type?: string; deviceId?: string };
-    if (!b?.cardId || !b?.type) return reply.code(400).send({ error: 'cardId and type required' });
-    await prisma.cardEvent.create({
-      data: { cardId: b.cardId, type: b.type, deviceId: b.deviceId ?? null },
-    });
+    const parsed = cardEventSchema.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: 'invalid_event' });
+    const { cardId, type, deviceId } = parsed.data;
+    try {
+      await prisma.cardEvent.create({ data: { cardId, type, deviceId: deviceId ?? null } });
+    } catch (err) {
+      // P2003 = foreign key violation → the cardId doesn't exist.
+      if (prismaCode(err) === 'P2003') return reply.code(404).send({ error: 'card_not_found' });
+      throw err;
+    }
     return { ok: true };
   });
 
@@ -146,43 +184,62 @@ async function build() {
     return { cards: rows };
   });
 
-  app.post('/v1/admin/cards/:id/approve', { preHandler: requireAdmin }, async (req) => {
+  app.post('/v1/admin/cards/:id/approve', { preHandler: requireAdmin }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const card = await prisma.card.update({
-      where: { id },
-      data: { status: 'published', publishedAt: new Date() },
-    });
-    return { ok: true, card };
+    try {
+      const card = await prisma.card.update({
+        where: { id },
+        data: { status: 'published', publishedAt: new Date() },
+      });
+      await bumpFeedCacheVersion();
+      return { ok: true, card };
+    } catch (err) {
+      // P2025 = record not found.
+      if (prismaCode(err) === 'P2025') return reply.code(404).send({ error: 'not_found' });
+      throw err;
+    }
   });
 
-  app.post('/v1/admin/cards/:id/reject', { preHandler: requireAdmin }, async (req) => {
+  app.post('/v1/admin/cards/:id/reject', { preHandler: requireAdmin }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    await prisma.card.update({ where: { id }, data: { status: 'rejected' } });
-    return { ok: true };
+    try {
+      await prisma.card.update({ where: { id }, data: { status: 'rejected' } });
+      await bumpFeedCacheVersion();
+      return { ok: true };
+    } catch (err) {
+      if (prismaCode(err) === 'P2025') return reply.code(404).send({ error: 'not_found' });
+      throw err;
+    }
   });
 
-  app.patch('/v1/admin/cards/:id', { preHandler: requireAdmin }, async (req) => {
+  app.patch('/v1/admin/cards/:id', { preHandler: requireAdmin }, async (req, reply) => {
     const { id } = req.params as { id: string };
-    const b = req.body as Partial<{
-      title: string;
-      summary: string;
-      whyItMatters: string;
-      category: string;
-      difficulty: string;
-      tags: string[];
-    }>;
-    const card = await prisma.card.update({
-      where: { id },
-      data: {
-        ...(b.title !== undefined ? { title: b.title } : {}),
-        ...(b.summary !== undefined ? { summary: b.summary } : {}),
-        ...(b.whyItMatters !== undefined ? { whyItMatters: b.whyItMatters } : {}),
-        ...(b.category !== undefined ? { category: b.category } : {}),
-        ...(b.difficulty !== undefined ? { difficulty: b.difficulty as never } : {}),
-        ...(b.tags !== undefined ? { tags: b.tags } : {}),
-      },
-    });
-    return { ok: true, card };
+    const parsed = cardUpdateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: 'invalid_card_update',
+        details: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`),
+      });
+    }
+    const b = parsed.data;
+    try {
+      const card = await prisma.card.update({
+        where: { id },
+        data: {
+          ...(b.title !== undefined ? { title: b.title } : {}),
+          ...(b.summary !== undefined ? { summary: b.summary } : {}),
+          ...(b.whyItMatters !== undefined ? { whyItMatters: b.whyItMatters || null } : {}),
+          ...(b.category !== undefined ? { category: b.category } : {}),
+          ...(b.difficulty !== undefined ? { difficulty: b.difficulty } : {}),
+          ...(b.tags !== undefined ? { tags: b.tags } : {}),
+        },
+      });
+      await bumpFeedCacheVersion();
+      return { ok: true, card };
+    } catch (err) {
+      if (prismaCode(err) === 'P2025') return reply.code(404).send({ error: 'not_found' });
+      throw err;
+    }
   });
 
   return app;

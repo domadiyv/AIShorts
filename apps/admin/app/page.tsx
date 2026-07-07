@@ -1,3 +1,4 @@
+import { CATEGORIES, DIFFICULTIES } from '@aishorts/shared';
 import { approveCard, rejectCard, saveCard } from './actions';
 import { CardItem } from './CardItem';
 
@@ -5,16 +6,17 @@ const API = process.env.API_URL || 'http://localhost:4000';
 const TOKEN = process.env.ADMIN_TOKEN || '';
 const STATUSES = ['pending', 'published', 'rejected'] as const;
 
+// null = API unreachable/unauthorized (distinct from an empty list).
 async function getCards(status: string) {
   try {
     const r = await fetch(`${API}/v1/admin/cards?status=${status}&limit=100`, {
       headers: { 'x-admin-token': TOKEN },
       cache: 'no-store',
     });
-    if (!r.ok) return [];
+    if (!r.ok) return null;
     return (await r.json()).cards as any[];
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -40,19 +42,30 @@ export default async function Page({
           </a>
         ))}
       </nav>
-      <p className="count">
-        {cards.length} {status} card(s)
-      </p>
-      {cards.length === 0 && <div className="empty">No {status} cards.</div>}
-      {cards.map((c) => (
-        <CardItem
-          key={c.id}
-          card={c}
-          approveCard={approveCard}
-          rejectCard={rejectCard}
-          saveCard={saveCard}
-        />
-      ))}
+      {cards === null ? (
+        <div className="empty">
+          Can&apos;t reach the API at {API}. Start it with{' '}
+          <code>npm run -w @aishorts/api start</code> and check ADMIN_TOKEN in .env.
+        </div>
+      ) : (
+        <>
+          <p className="count">
+            {cards.length} {status} card(s)
+          </p>
+          {cards.length === 0 && <div className="empty">No {status} cards.</div>}
+          {cards.map((c) => (
+            <CardItem
+              key={c.id}
+              card={c}
+              categories={CATEGORIES}
+              difficulties={DIFFICULTIES}
+              approveCard={approveCard}
+              rejectCard={rejectCard}
+              saveCard={saveCard}
+            />
+          ))}
+        </>
+      )}
     </main>
   );
 }
