@@ -17,6 +17,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { CATEGORIES, DIFFICULTIES } from './src/config';
 import { fetchFeed, recordEvent } from './src/api';
 import { getBookmarks, toggleBookmark } from './src/bookmarks';
+import { getReads, markRead } from './src/reads';
 import type { Card } from './src/types';
 
 const DIFF_COLORS: Record<string, string> = {
@@ -24,6 +25,64 @@ const DIFF_COLORS: Record<string, string> = {
   intermediate: '#b45309',
   advanced: '#b91c1c',
 };
+
+type Tab = 'feed' | 'saved' | 'read';
+
+// The difficulty picker options: "All levels" (undefined) + the real levels.
+const LEVEL_OPTIONS: { label: string; value: string | undefined }[] = [
+  { label: 'All levels', value: undefined },
+  ...DIFFICULTIES.map((d) => ({ label: d[0].toUpperCase() + d.slice(1), value: d as string })),
+];
+
+// Compact difficulty dropdown: opens on tap (all platforms) and on hover (web),
+// and applies the selection immediately. Replaces the old always-on level row.
+function LevelsDropdown({
+  value,
+  onChange,
+}: {
+  value: string | undefined;
+  onChange: (v: string | undefined) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const current = LEVEL_OPTIONS.find((o) => o.value === value) ?? LEVEL_OPTIONS[0];
+  return (
+    <View style={styles.levels}>
+      <Pressable
+        style={[styles.levelsBtn, !!value && styles.levelsBtnOn]}
+        onPress={() => setOpen((o) => !o)}
+        onHoverIn={() => setOpen(true)}
+      >
+        <Text style={[styles.levelsBtnText, !!value && styles.levelsBtnTextOn]}>
+          {current.label} ▾
+        </Text>
+      </Pressable>
+      {open ? (
+        <>
+          <Pressable style={styles.levelsBackdrop} onPress={() => setOpen(false)} />
+          <View style={styles.levelsMenu}>
+            {LEVEL_OPTIONS.map((o) => {
+              const active = o.value === value;
+              return (
+                <Pressable
+                  key={o.label}
+                  style={[styles.levelsItem, active && styles.levelsItemOn]}
+                  onPress={() => {
+                    onChange(o.value);
+                    setOpen(false);
+                  }}
+                >
+                  <Text style={[styles.levelsItemText, active && styles.levelsItemTextOn]}>
+                    {o.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </>
+      ) : null}
+    </View>
+  );
+}
 
 function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
   return (
@@ -89,7 +148,7 @@ function CardView({
 
 function Feed() {
   const insets = useSafeAreaInsets();
-  const [tab, setTab] = useState<'feed' | 'saved'>('feed');
+  const [tab, setTab] = useState<Tab>('feed');
   const [category, setCategory] = useState<string | undefined>();
   const [difficulty, setDifficulty] = useState<string | undefined>();
   const [cards, setCards] = useState<Card[]>([]);
@@ -98,9 +157,13 @@ function Feed() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [bookmarks, setBookmarks] = useState<Card[]>([]);
+  const [reads, setReads] = useState<Card[]>([]);
   const [feedHeight, setFeedHeight] = useState(0);
 
   const savedIds = useMemo(() => new Set(bookmarks.map((c) => c.id)), [bookmarks]);
+  const readIds = useMemo(() => new Set(reads.map((c) => c.id)), [reads]);
+  // Read cards drop out of the live feed and surface under the Read tab.
+  const feedData = useMemo(() => cards.filter((c) => !readIds.has(c.id)), [cards, readIds]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -122,13 +185,17 @@ function Feed() {
 
   useEffect(() => {
     getBookmarks().then(setBookmarks);
+    getReads().then(setReads);
   }, []);
 
+  // Pull-to-refresh: re-fetch whichever list the active tab is showing.
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
       if (tab === 'saved') {
         setBookmarks(await getBookmarks());
+      } else if (tab === 'read') {
+        setReads(await getReads());
       } else {
         const res = await fetchFeed({ category, difficulty });
         setCards(res.cards);
@@ -162,12 +229,14 @@ function Feed() {
 
   const onOpen = useCallback((card: Card) => {
     recordEvent(card.id, 'read_more');
+    // Opening an article marks it read → it leaves the feed and moves to Read.
+    markRead(card).then(setReads);
     WebBrowser.openBrowserAsync(card.sourceUrl).catch(() => {});
   }, []);
 
   const onFeedLayout = (e: LayoutChangeEvent) => setFeedHeight(e.nativeEvent.layout.height);
 
-  const data = tab === 'feed' ? cards : bookmarks;
+  const data = tab === 'feed' ? feedData : tab === 'saved' ? bookmarks : reads;
 
   return (
     <View style={[styles.root, { paddingTop: insets.top }]}>
@@ -183,10 +252,20 @@ function Feed() {
             active={tab === 'saved'}
             onPress={() => setTab('saved')}
           />
+          <Chip
+            label={`Read${reads.length ? ` (${reads.length})` : ''}`}
+            active={tab === 'read'}
+            onPress={() => setTab('read')}
+          />
         </View>
         {tab === 'feed' && (
-          <>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
+          <View style={styles.filterRow}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.chipRow}
+              contentContainerStyle={styles.chipRowContent}
+            >
               <Chip label="All" active={!category} onPress={() => setCategory(undefined)} />
               {CATEGORIES.map((c) => (
                 <Chip
@@ -197,18 +276,8 @@ function Feed() {
                 />
               ))}
             </ScrollView>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
-              <Chip label="All levels" active={!difficulty} onPress={() => setDifficulty(undefined)} />
-              {DIFFICULTIES.map((d) => (
-                <Chip
-                  key={d}
-                  label={d}
-                  active={difficulty === d}
-                  onPress={() => setDifficulty(difficulty === d ? undefined : d)}
-                />
-              ))}
-            </ScrollView>
-          </>
+            <LevelsDropdown value={difficulty} onChange={setDifficulty} />
+          </View>
         )}
       </View>
 
@@ -222,7 +291,9 @@ function Feed() {
             <Text style={styles.empty}>
               {tab === 'saved'
                 ? 'No saved shorts yet. Tap ☆ Save on a card.'
-                : 'No cards. Pull to refresh.'}
+                : tab === 'read'
+                  ? 'Nothing read yet. Open a card with “Read full →”.'
+                  : 'No cards. Pull to refresh.'}
             </Text>
           </View>
         ) : feedHeight > 0 ? (
@@ -269,12 +340,50 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderBottomWidth: 1,
     borderBottomColor: '#e6e8ec',
+    zIndex: 30, // keep the Levels dropdown above the feed list
   },
   brandRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8, paddingTop: 6 },
   brand: { fontSize: 22, fontWeight: '700', color: '#14161a', letterSpacing: -0.5 },
   tagline: { fontSize: 12, color: '#6b7280' },
   tabs: { flexDirection: 'row', gap: 8, marginTop: 10 },
-  chipRow: { marginTop: 8 },
+  filterRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, zIndex: 30 },
+  chipRow: { flex: 1 },
+  chipRowContent: { alignItems: 'center' },
+  // Levels dropdown
+  levels: { position: 'relative', marginLeft: 8, zIndex: 40 },
+  levelsBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: '#eceef2',
+    borderWidth: 1,
+    borderColor: '#dfe3e8',
+  },
+  levelsBtnOn: { backgroundColor: '#2563eb', borderColor: '#2563eb' },
+  levelsBtnText: { fontSize: 13, color: '#374151', fontWeight: '600', textTransform: 'capitalize' },
+  levelsBtnTextOn: { color: '#ffffff' },
+  levelsBackdrop: { position: 'absolute', top: -1000, left: -1000, right: -1000, bottom: -1000, zIndex: 39 },
+  levelsMenu: {
+    position: 'absolute',
+    top: 40,
+    right: 0,
+    minWidth: 160,
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#e6e8ec',
+    paddingVertical: 6,
+    zIndex: 41,
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
+  },
+  levelsItem: { paddingVertical: 9, paddingHorizontal: 14, borderRadius: 8 },
+  levelsItemOn: { backgroundColor: '#eef2ff' },
+  levelsItemText: { fontSize: 14, color: '#374151' },
+  levelsItemTextOn: { color: '#4338ca', fontWeight: '700' },
   chip: {
     paddingVertical: 6,
     paddingHorizontal: 12,

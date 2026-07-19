@@ -2,11 +2,20 @@ import { Redis } from '@upstash/redis';
 
 // Upstash REST client (reads UPSTASH_REDIS_REST_URL / _TOKEN from env).
 // All cache ops are best-effort — a Redis hiccup must never break the API.
+//
+// NOTE: newer @upstash/redis no longer throws from fromEnv() when creds are
+// missing — it returns a client that then retries for ~13s per command,
+// stalling every request. So we only construct the client when BOTH env vars
+// are actually present; otherwise the API runs cache-less (and fast).
 let redis: Redis | null = null;
-try {
-  redis = Redis.fromEnv();
-} catch {
-  redis = null; // no creds configured → run without cache
+const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+if (redisUrl && redisToken) {
+  try {
+    redis = new Redis({ url: redisUrl, token: redisToken });
+  } catch {
+    redis = null; // misconfigured → run without cache
+  }
 }
 
 export async function cacheGet<T>(key: string): Promise<T | null> {
