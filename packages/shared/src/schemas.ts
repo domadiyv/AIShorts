@@ -64,6 +64,37 @@ export const cardEventSchema = z.object({
 });
 export type CardEventInput = z.infer<typeof cardEventSchema>;
 
+// ---- Auth ----
+export const registerSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8).max(200),
+  name: z.string().min(1).max(80).optional(),
+});
+export type RegisterInput = z.infer<typeof registerSchema>;
+
+export const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1).max(200),
+});
+export type LoginInput = z.infer<typeof loginSchema>;
+
+// Google SSO: the client sends the Google ID token (a JWT). In mock mode
+// (no GOOGLE_CLIENT_ID configured) it's a base64url-encoded JSON identity.
+export const googleAuthSchema = z.object({
+  idToken: z.string().min(1),
+});
+export type GoogleAuthInput = z.infer<typeof googleAuthSchema>;
+
+// Public user shape returned to clients (never includes passwordHash).
+export const publicUserSchema = z.object({
+  id: z.string(),
+  email: z.string().nullable(),
+  name: z.string().nullable(),
+  avatarUrl: z.string().nullable(),
+  provider: z.string(),
+});
+export type PublicUser = z.infer<typeof publicUserSchema>;
+
 // Newsletter signup payload.
 export const subscribeSchema = z.object({
   email: z.string().email(),

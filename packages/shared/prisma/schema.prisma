@@ -97,11 +97,17 @@ model Card {
 }
 
 model User {
-  id        String     @id @default(cuid())
-  email     String?    @unique
-  createdAt DateTime   @default(now())
-  bookmarks Bookmark[]
-  devices   Device[]
+  id           String     @id @default(cuid())
+  email        String?    @unique
+  name         String?
+  passwordHash String? // null for SSO-only accounts
+  avatarUrl    String?
+  provider     String     @default("password") // password | google
+  googleSub    String?    @unique // Google "sub" claim, for SSO accounts
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  bookmarks    Bookmark[]
+  devices      Device[]
 
   @@map("users")
 }
