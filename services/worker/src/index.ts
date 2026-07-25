@@ -1,15 +1,12 @@
 import { prisma } from '@aishorts/shared';
-import { ingest } from './ingest';
-import { summarizePending } from './summarize';
+import { runPipeline } from './pipeline';
 
-// Full pipeline run: pull feeds, then summarize new items into pending cards.
+// CLI entry point. The same pipeline is also triggerable from the admin panel
+// (POST /v1/admin/refresh) — both call runPipeline().
 async function main() {
   console.log('== AIShorts content pipeline ==');
-  console.log('1) Ingesting RSS sources...');
-  await ingest();
-  console.log('2) Summarizing new items with Claude...');
-  await summarizePending();
-  console.log('Done. Review pending cards in the admin panel before publishing.');
+  await runPipeline();
+  console.log('Review pending cards in the admin panel before publishing.');
 }
 
 main()
