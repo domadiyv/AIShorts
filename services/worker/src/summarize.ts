@@ -1,4 +1,4 @@
-import { prisma, CATEGORIES, DIFFICULTIES, cardDraftSchema, type CardDraft } from '@aishorts/shared';
+import { prisma, Prisma, CATEGORIES, DIFFICULTIES, cardDraftSchema, type CardDraft } from '@aishorts/shared';
 import { chatJson, activeProvider, activeModel } from './llm';
 import { getArticleText } from './articles';
 
@@ -54,15 +54,42 @@ async function draftFor(title: string, body: string, sourceName: string): Promis
   return draft;
 }
 
+// AIShorts is a DAILY news app, so we only ever draft cards for recent articles.
+// This matters more than it looks: the first ingest of a blog pulls its whole
+// archive, and processing oldest-first meant that backlog was summarized ahead of
+// today's news indefinitely. Stale items stay in raw_items (nothing is deleted) —
+// they simply stop being eligible. Raise this to mine the archive on purpose.
+const MAX_ARTICLE_AGE_DAYS = Number(process.env.MAX_ARTICLE_AGE_DAYS ?? 21);
+
 export async function summarizePending(limit = 25): Promise<{ created: number; skipped: number }> {
-  // Raw items with no card yet, oldest unprocessed first.
+  const cutoff = new Date(Date.now() - MAX_ARTICLE_AGE_DAYS * 86_400_000);
+  const eligible: Prisma.RawItemWhereInput = {
+    processedAt: null,
+    card: { is: null },
+    OR: [
+      { publishedAt: { gte: cutoff } },
+      // Feeds that omit a date: fall back to when we fetched it.
+      { publishedAt: null, fetchedAt: { gte: cutoff } },
+    ],
+  };
+
+  // Freshest article first — the newest news becomes a card first.
   const items = await prisma.rawItem.findMany({
-    where: { processedAt: null, card: { is: null } },
-    orderBy: { fetchedAt: 'asc' },
+    where: eligible,
+    orderBy: [{ publishedAt: { sort: 'desc', nulls: 'last' } }, { fetchedAt: 'desc' }],
     take: limit,
   });
 
+  const staleBacklog = await prisma.rawItem.count({
+    where: { processedAt: null, card: { is: null }, NOT: eligible },
+  });
+
   console.log(`Using ${activeProvider()} model "${activeModel()}" (${items.length} items queued)`);
+  if (staleBacklog) {
+    console.log(
+      `  (skipping ${staleBacklog} article(s) older than ${MAX_ARTICLE_AGE_DAYS} days — raise MAX_ARTICLE_AGE_DAYS to include them)`,
+    );
+  }
   let created = 0;
   let skipped = 0;
 

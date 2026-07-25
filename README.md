@@ -32,6 +32,15 @@ npm run -w @aishorts/api start        # API on http://localhost:4000
 npm run -w @aishorts/admin dev        # admin on http://localhost:4001
 ```
 
-Mobile app: `cd apps/mobile && npm install && npx expo start` — set
-`EXPO_PUBLIC_API_URL` in `apps/mobile/.env` to your PC's LAN IP for a physical device
-(details + firewall setup in RUNBOOK.md §7B).
+## Running the mobile app (iPhone + Expo Go over LAN — verified working)
+
+Two terminal windows, then scan the QR with the iPhone Camera:
+
+```bash
+npm run -w @aishorts/api start        # window 1 — API on :4000, leave open
+cd apps/mobile && npx expo start      # window 2 — Metro on :8081, leave open
+```
+
+The QR must show `exp://<your-LAN-IP>:8081`, not `127.0.0.1`. The phone must be on the
+same Wi-Fi. **Full step-by-step, one-time firewall setup, and troubleshooting:
+[RUNBOOK.md §7](RUNBOOK.md).**

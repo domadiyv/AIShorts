@@ -24,6 +24,48 @@ h1 { font-size: 22px; margin: 0 0 4px; }
 .card textarea { min-height: 84px; resize: vertical; line-height: 1.5; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .src { color: #8a91a0; font-size: 12px; margin: 6px 0; word-break: break-all; }
+.pill-warn { background: #3a2a12; color: #e8b45a; }
+
+/* Published / sourced timestamps */
+.stamps {
+  display: flex; flex-wrap: wrap; gap: 6px 20px;
+  margin: 10px 0 8px; font-size: 12px; color: #aeb6c2;
+}
+.stamps > span { display: flex; align-items: baseline; gap: 6px; }
+.stamp-label { color: #7c8494; text-transform: uppercase; letter-spacing: .4px; font-size: 10px; }
+
+/* Clickable source link — big tap target for phone review */
+.src-link {
+  display: block; margin: 6px 0 12px; padding: 10px 12px;
+  background: #12151b; border: 1px solid #2a2e37; border-radius: 8px;
+  color: #6ea8fe; text-decoration: none; font-size: 14px; font-weight: 600;
+}
+.src-link:hover { border-color: #3b82f6; background: #141922; }
+.src-url {
+  display: block; margin-top: 4px; color: #7c8494;
+  font-size: 11px; font-weight: 400; word-break: break-all;
+}
+
+/* Fetch-new-articles control */
+.refresh { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 0 0 18px; }
+.btn-refresh { background: #1d4ed8; color: #fff; }
+.btn-refresh:disabled { background: #23304d; color: #8fa2c4; cursor: default; }
+.refresh-msg { font-size: 13px; color: #9aa0a6; }
+.refresh-ok { color: #7ee2a8; }
+.refresh-err { color: #f0938f; }
+
+/* Login */
+.login-wrap { max-width: 380px; }
+.login-card { margin-top: 8px; }
+.login-label { display: block; font-size: 13px; color: #aeb6c2; margin-bottom: 6px; }
+.login-error { color: #f0938f; font-size: 13px; margin: 0 0 10px; }
+.topbar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.btn-logout {
+  background: none; border: 1px solid #2a2e37; color: #9aa0a6;
+  padding: 5px 12px; font-size: 13px; font-weight: 500;
+}
+.btn-logout:hover { color: #e8eaed; border-color: #3a4050; }
+
 button { border: 0; border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-weight: 600; }
 .btn-approve { background: #16a34a; color: #fff; }
 .btn-reject { background: #3a2026; color: #f0938f; }

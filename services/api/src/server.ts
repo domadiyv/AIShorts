@@ -15,6 +15,7 @@ import {
   type FeedCard,
 } from '@aishorts/shared';
 import { cacheGet, cacheSet, feedCacheVersion, bumpFeedCacheVersion } from './redis';
+import { getRefreshState, startRefresh } from './refreshJob';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? '';
@@ -180,9 +181,28 @@ async function build() {
       where: { status: status as never },
       orderBy: { createdAt: 'desc' },
       take: Math.min(Number(q.limit) || 50, 200),
+      // Reviewers need the ORIGINAL article's date and when we ingested it —
+      // both live on the linked raw item, not on the card.
+      include: { rawItem: { select: { publishedAt: true, fetchedAt: true } } },
     });
-    return { cards: rows };
+    return {
+      cards: rows.map(({ rawItem, ...card }) => ({
+        ...card,
+        articlePublishedAt: rawItem?.publishedAt ?? null,
+        sourcedAt: rawItem?.fetchedAt ?? null,
+      })),
+    };
   });
+
+  // Content refresh — kicked off from the admin panel's "Fetch new articles".
+  // Returns immediately; the panel polls GET for progress.
+  app.post('/v1/admin/refresh', { preHandler: requireAdmin }, async (_req, reply) => {
+    const { started, state } = startRefresh();
+    if (!started) return reply.code(409).send({ error: 'already_running', state });
+    return reply.code(202).send({ ok: true, state });
+  });
+
+  app.get('/v1/admin/refresh', { preHandler: requireAdmin }, async () => getRefreshState());
 
   app.post('/v1/admin/cards/:id/approve', { preHandler: requireAdmin }, async (req, reply) => {
     const { id } = req.params as { id: string };

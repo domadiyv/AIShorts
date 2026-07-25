@@ -11,9 +11,34 @@ type Card = {
   sourceName: string;
   sourceUrl: string;
   status: string;
+  articlePublishedAt?: string | null; // when the ORIGINAL article was published
+  sourcedAt?: string | null; // when our pipeline fetched it
 };
 
 type Action = (fd: FormData) => Promise<void>;
+
+// "22 Jul 2026, 14:00" — unambiguous (no US/EU day-month confusion) and short
+// enough for a phone. Rendered client-side, so it shows the reviewer's local time.
+function formatStamp(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+// Flag articles that were already old when we ingested them.
+function ageInDays(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86_400_000);
+}
 
 export function CardItem({
   card,
@@ -38,6 +63,8 @@ export function CardItem({
   const difficultyOpts = difficulties.includes(card.difficulty)
     ? difficulties
     : [card.difficulty, ...difficulties];
+  const days = ageInDays(card.articlePublishedAt);
+
   return (
     <form className="card">
       <input type="hidden" name="id" value={card.id} />
@@ -46,6 +73,11 @@ export function CardItem({
         <span className="pill">{card.category}</span>
         <span className="pill">{words} words</span>
         <span className="pill">{card.sourceName}</span>
+        {days !== null && days > 14 && (
+          <span className="pill pill-warn" title="The original article is over two weeks old">
+            {days}d old
+          </span>
+        )}
       </div>
       <input name="title" defaultValue={card.title} />
       <textarea name="summary" defaultValue={card.summary} />
@@ -66,7 +98,24 @@ export function CardItem({
           ))}
         </select>
       </div>
-      <div className="src">{card.sourceUrl}</div>
+
+      <div className="stamps">
+        <span>
+          <span className="stamp-label">Article published</span>
+          {formatStamp(card.articlePublishedAt)}
+        </span>
+        <span>
+          <span className="stamp-label">Sourced</span>
+          {formatStamp(card.sourcedAt)}
+        </span>
+      </div>
+
+      {/* Opens in a new tab so in-progress edits on this form are never lost. */}
+      <a className="src-link" href={card.sourceUrl} target="_blank" rel="noopener noreferrer">
+        Read original article ↗
+        <span className="src-url">{card.sourceUrl}</span>
+      </a>
+
       <div className="row">
         {card.status !== 'published' && (
           <button className="btn-approve" formAction={approveCard}>

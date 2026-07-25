@@ -1,6 +1,17 @@
 import { CATEGORIES, DIFFICULTIES } from '@aishorts/shared';
-import { approveCard, rejectCard, saveCard } from './actions';
+import { approveCard, getRefreshState, rejectCard, saveCard, type RefreshState } from './actions';
+import { logout } from './login/actions';
 import { CardItem } from './CardItem';
+import { RefreshButton } from './RefreshButton';
+
+const IDLE_REFRESH: RefreshState = {
+  status: 'idle',
+  message: '',
+  startedAt: null,
+  finishedAt: null,
+  result: null,
+  error: null,
+};
 
 const API = process.env.API_URL || 'http://localhost:4000';
 const TOKEN = process.env.ADMIN_TOKEN || '';
@@ -29,12 +40,25 @@ export default async function Page({
   const status = (STATUSES as readonly string[]).includes(sp.status ?? '')
     ? (sp.status as string)
     : 'pending';
-  const cards = await getCards(status);
+  // Read the job state server-side so a refresh already in flight (started on
+  // another device, or before a reload) shows as running immediately.
+  const [cards, refreshState] = await Promise.all([
+    getCards(status),
+    getRefreshState().catch(() => IDLE_REFRESH),
+  ]);
 
   return (
     <main className="wrap">
-      <h1>AIShorts — Review</h1>
+      <div className="topbar">
+        <h1>AIShorts — Review</h1>
+        <form action={logout}>
+          <button className="btn-logout" type="submit">
+            Sign out
+          </button>
+        </form>
+      </div>
       <p className="sub">Approve, edit, or reject AI-drafted cards before they go live.</p>
+      <RefreshButton initialState={refreshState} />
       <nav className="tabs">
         {STATUSES.map((s) => (
           <a key={s} className={`tab ${s === status ? 'active' : ''}`} href={`/?status=${s}`}>
