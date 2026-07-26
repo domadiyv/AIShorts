@@ -3,9 +3,11 @@ import {
   ActivityIndicator,
   FlatList,
   Image,
+  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -16,8 +18,9 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { Ionicons } from '@expo/vector-icons';
 import * as WebBrowser from 'expo-web-browser';
-import { CATEGORIES, DIFFICULTIES } from './src/config';
+import { CATEGORIES } from './src/config';
 import { fetchFeed, recordEvent } from './src/api';
 import { getBookmarks, toggleBookmark } from './src/bookmarks';
 import { getReads, markRead, markReadMany } from './src/reads';
@@ -33,60 +36,12 @@ const DIFF_COLORS: Record<string, string> = {
 
 type Tab = 'feed' | 'saved' | 'read';
 
-// The difficulty picker options: "All levels" (undefined) + the real levels.
-const LEVEL_OPTIONS: { label: string; value: string | undefined }[] = [
-  { label: 'All levels', value: undefined },
-  ...DIFFICULTIES.map((d) => ({ label: d[0].toUpperCase() + d.slice(1), value: d as string })),
-];
-
-// Compact difficulty dropdown: opens on tap (all platforms) and on hover (web),
-// and applies the selection immediately. Replaces the old always-on level row.
-function LevelsDropdown({
-  value,
-  onChange,
-}: {
-  value: string | undefined;
-  onChange: (v: string | undefined) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const current = LEVEL_OPTIONS.find((o) => o.value === value) ?? LEVEL_OPTIONS[0];
-  return (
-    <View style={styles.levels}>
-      <Pressable
-        style={[styles.levelsBtn, !!value && styles.levelsBtnOn]}
-        onPress={() => setOpen((o) => !o)}
-        onHoverIn={() => setOpen(true)}
-      >
-        <Text style={[styles.levelsBtnText, !!value && styles.levelsBtnTextOn]}>
-          {current.label} ▾
-        </Text>
-      </Pressable>
-      {open ? (
-        <>
-          <Pressable style={styles.levelsBackdrop} onPress={() => setOpen(false)} />
-          <View style={styles.levelsMenu}>
-            {LEVEL_OPTIONS.map((o) => {
-              const active = o.value === value;
-              return (
-                <Pressable
-                  key={o.label}
-                  style={[styles.levelsItem, active && styles.levelsItemOn]}
-                  onPress={() => {
-                    onChange(o.value);
-                    setOpen(false);
-                  }}
-                >
-                  <Text style={[styles.levelsItemText, active && styles.levelsItemTextOn]}>
-                    {o.label}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
-        </>
-      ) : null}
-    </View>
-  );
+// Human-readable article date, e.g. "Jul 26, 2026". Empty string if unknown.
+function formatDate(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
@@ -102,26 +57,51 @@ function CardView({
   height,
   saved,
   onToggleSave,
+  onShare,
   onOpen,
 }: {
   card: Card;
   height: number;
   saved: boolean;
   onToggleSave: (c: Card) => void;
+  onShare: (c: Card) => void;
   onOpen: (c: Card) => void;
 }) {
+  const date = formatDate(card.publishedAt);
   return (
     <View style={[styles.card, { height }]}>
       {card.imageUrl ? <Image source={{ uri: card.imageUrl }} style={styles.image} /> : null}
       <View style={styles.cardBody}>
         <View style={styles.badges}>
-          <View style={[styles.badge, { backgroundColor: '#eef2ff' }]}>
-            <Text style={[styles.badgeText, { color: '#4338ca' }]}>{card.category}</Text>
+          <View style={styles.badgeGroup}>
+            <View style={[styles.badge, { backgroundColor: '#eef2ff' }]}>
+              <Text style={[styles.badgeText, { color: '#4338ca' }]}>{card.category}</Text>
+            </View>
+            <View style={[styles.badge, { backgroundColor: '#f1f3f5' }]}>
+              <Text style={[styles.badgeText, { color: DIFF_COLORS[card.difficulty] ?? '#444' }]}>
+                {card.difficulty}
+              </Text>
+            </View>
           </View>
-          <View style={[styles.badge, { backgroundColor: '#f1f3f5' }]}>
-            <Text style={[styles.badgeText, { color: DIFF_COLORS[card.difficulty] ?? '#444' }]}>
-              {card.difficulty}
-            </Text>
+          <View style={styles.cardActions}>
+            <Pressable style={styles.iconBtn} onPress={() => onShare(card)} hitSlop={8}>
+              <Ionicons
+                name={Platform.OS === 'android' ? 'share-social-outline' : 'share-outline'}
+                size={19}
+                color="#6b7280"
+              />
+            </Pressable>
+            <Pressable
+              style={[styles.iconBtn, saved && styles.iconBtnOn]}
+              onPress={() => onToggleSave(card)}
+              hitSlop={8}
+            >
+              <Ionicons
+                name={saved ? 'star' : 'star-outline'}
+                size={19}
+                color={saved ? '#2563eb' : '#6b7280'}
+              />
+            </Pressable>
           </View>
         </View>
         <Text style={styles.title}>{card.title}</Text>
@@ -130,22 +110,26 @@ function CardView({
           {card.whyItMatters ? (
             <Text style={styles.why}>Why it matters: {card.whyItMatters}</Text>
           ) : null}
-        </ScrollView>
-        <View style={styles.foot}>
-          <Text style={styles.src} numberOfLines={1}>
-            {card.sourceName}
-          </Text>
-          <View style={styles.footActions}>
-            <Pressable onPress={() => onToggleSave(card)} hitSlop={10}>
-              <Text style={[styles.save, saved && styles.saveOn]}>
-                {saved ? '★ Saved' : '☆ Save'}
-              </Text>
-            </Pressable>
-            <Pressable onPress={() => onOpen(card)} hitSlop={10}>
-              <Text style={styles.read}>Read full →</Text>
-            </Pressable>
+          <View style={styles.credit}>
+            <Text style={styles.creditLabel}>Source</Text>
+            <Text style={styles.creditSource} numberOfLines={1}>
+              {card.sourceName}
+            </Text>
+            {date ? <Text style={styles.creditDot}>·</Text> : null}
+            {date ? <Text style={styles.creditDate}>{date}</Text> : null}
           </View>
-        </View>
+        </ScrollView>
+        <Pressable style={styles.readCta} onPress={() => onOpen(card)}>
+          <View style={styles.readCtaText}>
+            <Text style={styles.readCtaKicker}>CONTINUE READING</Text>
+            <Text style={styles.readCtaTitle} numberOfLines={1}>
+              Read the full story on {card.sourceName}
+            </Text>
+          </View>
+          <View style={styles.readCtaArrowWrap}>
+            <Text style={styles.readCtaArrow}>→</Text>
+          </View>
+        </Pressable>
       </View>
     </View>
   );
@@ -161,6 +145,7 @@ function CardList({
   refreshing,
   onRefresh,
   onToggleSave,
+  onShare,
   onOpen,
   onEndReached,
   onScroll,
@@ -171,6 +156,7 @@ function CardList({
   refreshing: boolean;
   onRefresh: () => void;
   onToggleSave: (c: Card) => void;
+  onShare: (c: Card) => void;
   onOpen: (c: Card) => void;
   onEndReached?: () => void;
   onScroll?: (e: NativeScrollEvent) => void;
@@ -194,6 +180,7 @@ function CardList({
           height={feedHeight}
           saved={savedIds.has(item.id)}
           onToggleSave={onToggleSave}
+          onShare={onShare}
           onOpen={onOpen}
         />
       )}
@@ -454,7 +441,6 @@ function Feed() {
   const [authMode, setAuthMode] = useState<'login' | 'register' | null>(null);
   const [tab, setTab] = useState<Tab>('feed');
   const [category, setCategory] = useState<string | undefined>();
-  const [difficulty, setDifficulty] = useState<string | undefined>();
   const [cards, setCards] = useState<Card[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -488,7 +474,7 @@ function Feed() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [res, currentReads] = await Promise.all([fetchFeed({ category, difficulty }), getReads()]);
+      const [res, currentReads] = await Promise.all([fetchFeed({ category }), getReads()]);
       const readSet = new Set(currentReads.map((c) => c.id));
       setReads(currentReads);
       // Filter already-read cards out at fetch time (not live), so opening or
@@ -502,7 +488,7 @@ function Feed() {
     } finally {
       setLoading(false);
     }
-  }, [category, difficulty]);
+  }, [category]);
 
   useEffect(() => {
     load();
@@ -528,7 +514,7 @@ function Feed() {
         setReads(await getReads());
       } else {
         const [res, currentReads] = await Promise.all([
-          fetchFeed({ category, difficulty }),
+          fetchFeed({ category }),
           getReads(),
         ]);
         const readSet = new Set(currentReads.map((c) => c.id));
@@ -542,13 +528,13 @@ function Feed() {
     } finally {
       setRefreshing(false);
     }
-  }, [tab, category, difficulty]);
+  }, [tab, category]);
 
   const loadMore = useCallback(async () => {
     if (tab !== 'feed' || !nextCursor || loadingMore) return;
     setLoadingMore(true);
     try {
-      const res = await fetchFeed({ category, difficulty, cursor: nextCursor });
+      const res = await fetchFeed({ category, cursor: nextCursor });
       const currentReads = await getReads();
       const readSet = new Set(currentReads.map((c) => c.id));
       const fresh = res.cards.filter((c) => !readSet.has(c.id));
@@ -559,11 +545,26 @@ function Feed() {
     } finally {
       setLoadingMore(false);
     }
-  }, [tab, nextCursor, loadingMore, category, difficulty]);
+  }, [tab, nextCursor, loadingMore, category]);
 
   const onToggleSave = useCallback((card: Card) => {
     toggleBookmark(card).then(setBookmarks);
     recordEvent(card.id, 'bookmark');
+  }, []);
+
+  const onShare = useCallback((card: Card) => {
+    recordEvent(card.id, 'share');
+    const url = card.sourceUrl;
+    if (Platform.OS === 'web') {
+      // Prefer the native Web Share sheet; fall back to copying the link.
+      const nav = globalThis.navigator as
+        | { share?: (d: { title?: string; url?: string }) => Promise<void>; clipboard?: { writeText: (s: string) => Promise<void> } }
+        | undefined;
+      if (nav?.share) nav.share({ title: card.title, url }).catch(() => {});
+      else if (nav?.clipboard) nav.clipboard.writeText(url).catch(() => {});
+      return;
+    }
+    Share.share({ title: card.title, message: `${card.title} — ${url}`, url }).catch(() => {});
   }, []);
 
   const onOpen = useCallback((card: Card) => {
@@ -585,7 +586,7 @@ function Feed() {
         <View style={styles.brandRow}>
           <View style={styles.brandBlock}>
             <Text style={styles.brand}>AIShorts</Text>
-            <Text style={styles.tagline}>Today in AI, in 60 words</Text>
+            <Text style={styles.tagline}>All about AI news</Text>
           </View>
           <View style={styles.avatarWrap}>
             <Pressable onPress={() => setMenuOpen((o) => !o)} hitSlop={8}>
@@ -631,7 +632,6 @@ function Feed() {
                 />
               ))}
             </ScrollView>
-            <LevelsDropdown value={difficulty} onChange={setDifficulty} />
           </View>
         ) : (
           <View style={styles.subHeader}>
@@ -668,6 +668,7 @@ function Feed() {
                   refreshing={refreshing}
                   onRefresh={onRefresh}
                   onToggleSave={onToggleSave}
+                  onShare={onShare}
                   onOpen={onOpen}
                   onEndReached={loadMore}
                   onScroll={onFeedScroll}
@@ -689,6 +690,7 @@ function Feed() {
                     refreshing={refreshing}
                     onRefresh={onRefresh}
                     onToggleSave={onToggleSave}
+                    onShare={onShare}
                     onOpen={onOpen}
                   />
                 )}
@@ -712,6 +714,7 @@ function Feed() {
                     refreshing={refreshing}
                     onRefresh={onRefresh}
                     onToggleSave={onToggleSave}
+                    onShare={onShare}
                     onOpen={onOpen}
                   />
                 )}
@@ -814,41 +817,6 @@ const styles = StyleSheet.create({
   filterRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, zIndex: 30 },
   chipRow: { flex: 1 },
   chipRowContent: { alignItems: 'center' },
-  // Levels dropdown
-  levels: { position: 'relative', marginLeft: 8, zIndex: 40 },
-  levelsBtn: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 999,
-    backgroundColor: '#eceef2',
-    borderWidth: 1,
-    borderColor: '#dfe3e8',
-  },
-  levelsBtnOn: { backgroundColor: '#2563eb', borderColor: '#2563eb' },
-  levelsBtnText: { fontSize: 13, color: '#374151', fontWeight: '600', textTransform: 'capitalize' },
-  levelsBtnTextOn: { color: '#ffffff' },
-  levelsBackdrop: { position: 'absolute', top: -1000, left: -1000, right: -1000, bottom: -1000, zIndex: 39 },
-  levelsMenu: {
-    position: 'absolute',
-    top: 40,
-    right: 0,
-    minWidth: 160,
-    backgroundColor: '#ffffff',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#e6e8ec',
-    paddingVertical: 6,
-    zIndex: 41,
-    shadowColor: '#000',
-    shadowOpacity: 0.12,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 8,
-  },
-  levelsItem: { paddingVertical: 9, paddingHorizontal: 14, borderRadius: 8 },
-  levelsItemOn: { backgroundColor: '#eef2ff' },
-  levelsItemText: { fontSize: 14, color: '#374151' },
-  levelsItemTextOn: { color: '#4338ca', fontWeight: '700' },
   chip: {
     paddingVertical: 6,
     paddingHorizontal: 12,
@@ -867,7 +835,25 @@ const styles = StyleSheet.create({
   card: { paddingHorizontal: 16, paddingTop: 14 },
   image: { width: '100%', height: 180, borderRadius: 14, backgroundColor: '#e9edf2', marginBottom: 14 },
   cardBody: { flex: 1, paddingBottom: 18 },
-  badges: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  badges: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  badgeGroup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  cardActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  iconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#f1f3f5',
+    borderWidth: 1,
+    borderColor: '#e6e8ec',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconBtnOn: { backgroundColor: '#eff4ff', borderColor: '#bfd3ff' },
   badge: { paddingVertical: 3, paddingHorizontal: 8, borderRadius: 6 },
   badgeText: { fontSize: 11, fontWeight: '600', textTransform: 'capitalize' },
   title: {
@@ -881,20 +867,46 @@ const styles = StyleSheet.create({
   summaryScroll: { flex: 1 },
   summary: { fontSize: 18, lineHeight: 28, color: '#23262b' },
   why: { fontSize: 14, color: '#6b7280', marginTop: 14, fontStyle: 'italic' },
-  foot: {
+  // Source label + source name + article date — one baseline, cohesive type.
+  credit: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 16 },
+  creditLabel: { fontSize: 12, lineHeight: 16, color: '#9aa3b2', fontWeight: '500' },
+  creditSource: { fontSize: 12, lineHeight: 16, fontWeight: '600', color: '#6b7280', flexShrink: 1 },
+  creditDot: { fontSize: 12, lineHeight: 16, color: '#c2c8d0' },
+  creditDate: { fontSize: 12, lineHeight: 16, color: '#9aa3b2', fontWeight: '500' },
+  // Full-width "read full article" call to action
+  readCta: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    borderTopWidth: 1,
-    borderTopColor: '#e6e8ec',
-    paddingTop: 12,
-    marginTop: 10,
+    backgroundColor: '#2563eb',
+    borderRadius: 16,
+    paddingVertical: 15,
+    paddingHorizontal: 18,
+    marginTop: 14,
+    shadowColor: '#2563eb',
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 5,
   },
-  src: { fontSize: 12, color: '#8a91a0', flex: 1, marginRight: 10 },
-  footActions: { flexDirection: 'row', alignItems: 'center', gap: 16 },
-  save: { fontSize: 14, color: '#6b7280', fontWeight: '600' },
-  saveOn: { color: '#2563eb' },
-  read: { fontSize: 14, color: '#2563eb', fontWeight: '700' },
+  readCtaText: { flex: 1, marginRight: 12 },
+  readCtaKicker: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: 'rgba(255,255,255,0.72)',
+    letterSpacing: 1.4,
+    marginBottom: 3,
+  },
+  readCtaTitle: { fontSize: 16, fontWeight: '700', color: '#ffffff', letterSpacing: -0.2 },
+  readCtaArrowWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  readCtaArrow: { fontSize: 18, color: '#ffffff', fontWeight: '700' },
   // Auth modal
   modalOverlay: {
     position: 'absolute',
