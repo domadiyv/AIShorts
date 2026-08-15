@@ -47,6 +47,9 @@ export function CardItem({
   approveCard,
   rejectCard,
   saveCard,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
 }: {
   card: Card;
   categories: readonly string[];
@@ -54,6 +57,9 @@ export function CardItem({
   approveCard: Action;
   rejectCard: Action;
   saveCard: Action;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
 }) {
   const words = card.summary.trim().split(/\s+/).filter(Boolean).length;
   // Keep non-canonical legacy values visible instead of silently coercing them.
@@ -66,8 +72,16 @@ export function CardItem({
   const days = ageInDays(card.articlePublishedAt);
 
   return (
-    <form className="card">
+    <form className={`card${selected ? ' card-selected' : ''}`}>
       <input type="hidden" name="id" value={card.id} />
+      {selectable && (
+        // Unnamed checkbox → never submitted with the per-card formAction buttons;
+        // it only drives the parent's bulk selection state.
+        <label className="card-select">
+          <input type="checkbox" checked={selected} onChange={() => onToggleSelect?.()} />
+          Select for bulk action
+        </label>
+      )}
       <div className="meta">
         <span className={`pill diff-${card.difficulty}`}>{card.difficulty}</span>
         <span className="pill">{card.category}</span>

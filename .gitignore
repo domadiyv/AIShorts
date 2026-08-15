@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 *.env.txt
+/env
 
 # Dependencies
 node_modules/
@@ -46,3 +47,7 @@ coverage/
 
 # Scratch/debug screenshots at app root (real icons live in assets/)
 apps/mobile/*.png
+
+# Self-hosted card media: keep bundled seed placeholders, ignore downloaded images.
+services/api/media/*
+!services/api/media/seed/

@@ -5,6 +5,7 @@ import Fastify, {
   type FastifyRequest,
 } from 'fastify';
 import cors from '@fastify/cors';
+import fastifyStatic from '@fastify/static';
 import {
   prisma,
   CATEGORIES,
@@ -12,6 +13,9 @@ import {
   subscribeSchema,
   cardUpdateSchema,
   cardEventSchema,
+  mediaDir,
+  MEDIA_ROUTE,
+  ensureSeedMedia,
   type FeedCard,
 } from '@aishorts/shared';
 import { cacheGet, cacheSet, feedCacheVersion, bumpFeedCacheVersion } from './redis';
@@ -67,6 +71,17 @@ function prismaCode(err: unknown): string | undefined {
 async function build() {
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
+
+  // Serve self-hosted card images (Pexels downloads + bundled seed placeholders)
+  // at /media/*. mediaDir() creates the dir if missing so this never throws on a
+  // fresh install/volume. imageUrls in the DB are stored relative (/media/x.jpg).
+  ensureSeedMedia(); // hydrate bundled placeholders into the (possibly empty) volume
+  await app.register(fastifyStatic, {
+    root: mediaDir(),
+    prefix: `${MEDIA_ROUTE}/`,
+    decorateReply: false,
+    maxAge: '7d',
+  });
 
   // Never echo internal error details (Prisma queries, file paths) to clients.
   app.setErrorHandler((err: FastifyError, req, reply) => {
@@ -233,6 +248,40 @@ async function build() {
       if (prismaCode(err) === 'P2025') return reply.code(404).send({ error: 'not_found' });
       throw err;
     }
+  });
+
+  // Bulk approve / reject — powers the panel's "Approve all" / "Approve selected".
+  // One updateMany (single DB round-trip + one cache bump) for the whole batch.
+  // Scoped so it's idempotent and can't clobber prior decisions: approve only
+  // touches pending drafts; reject leaves already-rejected cards alone. Re-sending
+  // an id that no longer qualifies is a safe no-op (reflected in the count).
+  const parseIds = (body: unknown): string[] | null => {
+    const ids = (body as { ids?: unknown })?.ids;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 500) return null;
+    if (!ids.every((x) => typeof x === 'string' && x.length > 0)) return null;
+    return ids as string[];
+  };
+
+  app.post('/v1/admin/cards/bulk-approve', { preHandler: requireAdmin }, async (req, reply) => {
+    const ids = parseIds(req.body);
+    if (!ids) return reply.code(400).send({ error: 'invalid_ids' });
+    const { count } = await prisma.card.updateMany({
+      where: { id: { in: ids }, status: 'pending' },
+      data: { status: 'published', publishedAt: new Date() },
+    });
+    await bumpFeedCacheVersion();
+    return { ok: true, count };
+  });
+
+  app.post('/v1/admin/cards/bulk-reject', { preHandler: requireAdmin }, async (req, reply) => {
+    const ids = parseIds(req.body);
+    if (!ids) return reply.code(400).send({ error: 'invalid_ids' });
+    const { count } = await prisma.card.updateMany({
+      where: { id: { in: ids }, status: { not: 'rejected' } },
+      data: { status: 'rejected' },
+    });
+    await bumpFeedCacheVersion();
+    return { ok: true, count };
   });
 
   app.patch('/v1/admin/cards/:id', { preHandler: requireAdmin }, async (req, reply) => {

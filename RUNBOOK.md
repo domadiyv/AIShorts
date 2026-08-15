@@ -7,6 +7,13 @@ what we decided, what broke, what's resolved vs not, and exactly how to run it._
 > Just want to run it? → **§7.1**. Refresh the news? → **§7.5**. Firewall/security? → **§7.6**.
 > **App was working but suddenly won't load?** → **§7.3.1** (99% the Wi-Fi went Public).
 
+> **📦 Packaging & deployment (Docker, Android APK, cloud) moved to [DEPLOY.md](DEPLOY.md).**
+> This RUNBOOK is the **historical dev record** (Windows/Expo-Go-over-LAN, Neon+Upstash).
+> The shipping path — self-contained Docker stack (bundled Postgres, no Neon/Upstash
+> needed), one-command run, Cloudflare tunnel, local Android APK build, no-login cache,
+> Google SSO, self-hosted Pexels media, and the Phase 1 → Phase 2 (cloud) migration — is
+> all in **[DEPLOY.md](DEPLOY.md)**. See **§10** below for what changed.
+
 ---
 
 ## 1. What we're building (requirements)
@@ -423,3 +430,57 @@ To change sources **today**: edit `sources.ts` and re-run ingest (adds/updates),
 - Ports: API **4000**, admin **4001**, Metro **8081**. Expo SDK **54** (must match the
   phone's Expo Go, §6.13). Firewall/security posture: §7.6.
 - Admin token for API admin calls: header `x-admin-token: dev-admin-token-change-me`.
+
+---
+
+## 10. Delivery / packaging phase (2026-08-02) — what changed
+
+This phase made the app **shippable on real devices and portable to the cloud**. Full
+operator guide is **[DEPLOY.md](DEPLOY.md)**; this section is the "what & why" for the
+history. Confirmed decisions: **Android first / iPhone later**, **local builds** (no EAS),
+**bundled Postgres container + data** (Neon/Upstash no longer required), **Pexels photos
+self-hosted**. The admin panel was explicitly **retained** as a first-class service.
+
+**Added / changed:**
+- **Dockerized the whole backend** (`Dockerfile`, `docker-compose.yml`, `.dockerignore`):
+  one `node:20-bookworm-slim` image runs api + worker (via `tsx`) and admin (`next dev`);
+  `postgres:16` with a `pgdata` volume; a one-shot `migrate` service (`prisma migrate
+  deploy` + idempotent seed); a `media` volume for self-hosted images; worker under the
+  `jobs` profile. `scripts/docker-up.sh` = one-command stack. **No cloud DB needed** — the
+  bundled Postgres replaces Neon; the API runs cache-less so **Upstash is not required**.
+- **Data migration** (`scripts/db-dump.sh`, `db-restore.sh`, `migrate-data.sh`): dump/
+  restore and a one-shot source→target move for lifting the already-summarized cards into
+  the container or the cloud.
+- **Internet exposure** (`scripts/tunnel.sh`): Cloudflare Tunnel (quick or named) gives an
+  **HTTPS** URL — required because Android release builds block cleartext HTTP.
+- **Android APK, local** (`scripts/build-android.sh`): `expo prebuild -p android` →
+  `gradlew assembleRelease` → `apps/mobile/dist/aishorts-release.apk`. `app.json` now sets
+  `android.package` / `ios.bundleIdentifier` = `com.aishorts.app`.
+- **Runtime API URL override:** in-app **Settings** screen writes `aishorts.apiurl.v1`, so
+  a built APK can be pointed at the tunnel (or later the cloud) **without rebuilding**;
+  falls back to the baked `EXPO_PUBLIC_API_URL`.
+- **No-login cache hardening:** the feed pages ahead until enough **unread** cards
+  accumulate, so a growing read-history never leaves the feed empty (read cards are
+  filtered client-side). Saved/History persist and grow unbounded by design.
+- **Real Google SSO:** `@react-native-google-signin/google-signin` (native — expo-auth-
+  session's Google provider is deprecated in SDK 54). Falls back to the mock identity when
+  no client ID is set, so web/dev demos keep working. Server already verifies real
+  id_tokens when `GOOGLE_CLIENT_ID` is set.
+- **License-safe media (Pexels, self-hosted):** API serves `/media/*` via `@fastify/
+  static`; images stored as **relative** URLs so they follow whatever backend the app
+  points at. Ingest fetches a Pexels photo per card (commercial-OK, no attribution);
+  fallback chain **Pexels → RSS image → bundled per-category placeholder** (self-generated
+  gradients under `services/api/media/seed/`, so it works offline in the container).
+  Backfill via `npm run -w @aishorts/worker backfill:media`.
+
+**Env additions** (`.env.example`): `AUTH_JWT_SECRET`, `GOOGLE_CLIENT_ID`,
+`PEXELS_API_KEY`, `POSTGRES_USER/PASSWORD/DB/PORT` (default host port **5433** to dodge a
+local Homebrew Postgres on 5432), optional `MEDIA_DIR`. Mobile: `apps/mobile/.env.example`
+with `EXPO_PUBLIC_API_URL` + `EXPO_PUBLIC_GOOGLE_CLIENT_ID`. **Secrets still never
+committed** — `.env`/`.env.*` stay gitignored and `.dockerignored`; only `.env.example`
+placeholders are tracked, and nothing real is baked into the image.
+
+**Verified 2026-08-02:** `docker compose up -d --build` → migrate exit 0, `/v1/health` ok,
+`/v1/feed` returns relative `/media/seed/<category>.png` URLs, `/media/seed/*.png` serve
+HTTP 200 image/png, admin :4001 login 200. Typecheck/build gates clean (shared, api,
+worker builds; `apps/mobile` `tsc --noEmit`).

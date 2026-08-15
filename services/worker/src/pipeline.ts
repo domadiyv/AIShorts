@@ -25,7 +25,7 @@ export async function runPipeline(
   const { fetched, inserted } = await ingest();
 
   step(`Found ${inserted} new article(s) of ${fetched} seen. Summarizing…`);
-  const { created, skipped } = await summarizePending();
+  const { created, skipped } = await summarizePending(25, onProgress);
 
   step(`Done — ${created} new draft card(s) ready for review.`);
   return { fetched, inserted, created, skipped };

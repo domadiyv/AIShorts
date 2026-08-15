@@ -1,7 +1,15 @@
 import { CATEGORIES, DIFFICULTIES } from '@aishorts/shared';
-import { approveCard, getRefreshState, rejectCard, saveCard, type RefreshState } from './actions';
+import {
+  approveCard,
+  approveCards,
+  getRefreshState,
+  rejectCard,
+  rejectCards,
+  saveCard,
+  type RefreshState,
+} from './actions';
 import { logout } from './login/actions';
-import { CardItem } from './CardItem';
+import { ReviewList } from './ReviewList';
 import { RefreshButton } from './RefreshButton';
 
 const IDLE_REFRESH: RefreshState = {
@@ -77,17 +85,17 @@ export default async function Page({
             {cards.length} {status} card(s)
           </p>
           {cards.length === 0 && <div className="empty">No {status} cards.</div>}
-          {cards.map((c) => (
-            <CardItem
-              key={c.id}
-              card={c}
-              categories={CATEGORIES}
-              difficulties={DIFFICULTIES}
-              approveCard={approveCard}
-              rejectCard={rejectCard}
-              saveCard={saveCard}
-            />
-          ))}
+          <ReviewList
+            cards={cards}
+            status={status}
+            categories={CATEGORIES}
+            difficulties={DIFFICULTIES}
+            approveCard={approveCard}
+            rejectCard={rejectCard}
+            saveCard={saveCard}
+            approveCards={approveCards}
+            rejectCards={rejectCards}
+          />
         </>
       )}
     </main>

@@ -1,0 +1,16 @@
+# Keep the build context small and never bake secrets or host artifacts into the image.
+**/node_modules
+**/dist
+**/.next
+**/.expo
+**/.turbo
+apps/mobile
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.dump
+*.log
+Dockerfile
+.dockerignore

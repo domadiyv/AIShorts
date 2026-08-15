@@ -6,7 +6,8 @@ const TOKEN = process.env.ADMIN_TOKEN || '';
 const headers = { 'x-admin-token': TOKEN, 'content-type': 'application/json' };
 
 // Fail loudly: a silent no-op on approve/reject is worse than an error page.
-async function call(path: string, init: RequestInit): Promise<void> {
+// Returns the parsed JSON body so bulk actions can report how many cards changed.
+async function call(path: string, init: RequestInit): Promise<any> {
   let res: Response;
   try {
     res = await fetch(`${API}${path}`, init);
@@ -18,6 +19,7 @@ async function call(path: string, init: RequestInit): Promise<void> {
     throw new Error(`API ${res.status} on ${path}: ${body.slice(0, 300)}`);
   }
   revalidatePath('/');
+  return res.json().catch(() => ({}));
 }
 
 export async function approveCard(formData: FormData) {
@@ -28,6 +30,28 @@ export async function approveCard(formData: FormData) {
 export async function rejectCard(formData: FormData) {
   const id = String(formData.get('id'));
   await call(`/v1/admin/cards/${id}/reject`, { method: 'POST', headers, body: '{}' });
+}
+
+// Bulk approve/reject — called directly (not via a <form>) from the selection
+// toolbar. Returns how many cards actually changed status so the UI can confirm.
+export async function approveCards(ids: string[]): Promise<number> {
+  if (!ids.length) return 0;
+  const data = await call(`/v1/admin/cards/bulk-approve`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ids }),
+  });
+  return Number(data?.count ?? 0);
+}
+
+export async function rejectCards(ids: string[]): Promise<number> {
+  if (!ids.length) return 0;
+  const data = await call(`/v1/admin/cards/bulk-reject`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ids }),
+  });
+  return Number(data?.count ?? 0);
 }
 
 export type RefreshState = {
