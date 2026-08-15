@@ -26,6 +26,19 @@ function sha1(s: string): string {
   return crypto.createHash('sha1').update(s).digest('hex');
 }
 
+// Feeds whose <guid> carries attributes (e.g. isPermaLink="false") are parsed by
+// rss-parser into an object like { _: "the-id", $: { isPermaLink: "false" } }
+// instead of a plain string. Coerce to the string form (or null) so Prisma's
+// String column accepts it. Microsoft Research, Google Research, etc. do this.
+function guidToString(guid: unknown): string | null {
+  if (typeof guid === 'string') return guid.trim() || null;
+  if (guid && typeof guid === 'object') {
+    const inner = (guid as { _?: unknown })._;
+    if (typeof inner === 'string') return inner.trim() || null;
+  }
+  return null;
+}
+
 // Cluster near-duplicate events: same normalized title => same cluster.
 function clusterKey(title: string): string {
   return sha1(
@@ -79,7 +92,7 @@ export async function ingest(): Promise<{ fetched: number; inserted: number }> {
             sourceId: source.id,
             sourceName: source.name,
             sourceUrl: link,
-            externalId: item.guid ?? null,
+            externalId: guidToString(item.guid),
             title,
             rawText: text || null,
             hash,

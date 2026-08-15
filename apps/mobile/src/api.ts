@@ -1,7 +1,15 @@
-import { API_URL } from './config';
+import { getApiBase } from './config';
 import type { Card } from './types';
 
 export type FeedResponse = { cards: Card[]; nextCursor: string | null };
+
+// Resolve a possibly-relative card image (`/media/x.jpg`) against the API base,
+// so self-hosted media follows the tunnel/cloud URL without rebaking cards.
+export function resolveMediaUrl(url: string | null): string | null {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  return `${getApiBase()}${url.startsWith('/') ? '' : '/'}${url}`;
+}
 
 export async function fetchFeed(
   opts: { category?: string; difficulty?: string; cursor?: string } = {},
@@ -10,7 +18,7 @@ export async function fetchFeed(
   if (opts.category) qs.set('category', opts.category);
   if (opts.difficulty) qs.set('difficulty', opts.difficulty);
   if (opts.cursor) qs.set('cursor', opts.cursor);
-  const res = await fetch(`${API_URL}/v1/feed?${qs.toString()}`);
+  const res = await fetch(`${getApiBase()}/v1/feed?${qs.toString()}`);
   if (!res.ok) throw new Error(`feed request failed: ${res.status}`);
   return (await res.json()) as FeedResponse;
 }
@@ -26,7 +34,7 @@ export type AuthUser = {
 export type AuthResponse = { token: string; user: AuthUser };
 
 async function authPost(path: string, body: unknown): Promise<AuthResponse> {
-  const res = await fetch(`${API_URL}${path}`, {
+  const res = await fetch(`${getApiBase()}${path}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -54,7 +62,7 @@ export function apiGoogle(idToken: string): Promise<AuthResponse> {
 
 // Fire-and-forget analytics (view / read_more / share / bookmark).
 export function recordEvent(cardId: string, type: string): void {
-  fetch(`${API_URL}/v1/events`, {
+  fetch(`${getApiBase()}/v1/events`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ cardId, type }),

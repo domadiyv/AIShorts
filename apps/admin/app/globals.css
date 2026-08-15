@@ -67,8 +67,32 @@ h1 { font-size: 22px; margin: 0 0 4px; }
 .btn-logout:hover { color: #e8eaed; border-color: #3a4050; }
 
 button { border: 0; border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
 .btn-approve { background: #16a34a; color: #fff; }
 .btn-reject { background: #3a2026; color: #f0938f; }
+.btn-approve-all { background: #15803d; color: #fff; }
 .btn-save { background: #2a2e37; color: #cdd2d8; }
 .empty { color: #9aa0a6; padding: 40px 0; text-align: center; }
 .count { color: #9aa0a6; font-size: 13px; }
+
+/* Bulk selection toolbar — sticks to the top so it's reachable while scrolling
+   a long pending list on a phone. */
+.bulkbar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px;
+  background: #12151b; border: 1px solid #262b35; border-radius: 10px;
+  padding: 10px 14px; margin: 6px 0 14px;
+}
+.bulk-check { display: flex; align-items: center; gap: 8px; font-size: 14px; color: #cdd2d8; cursor: pointer; }
+.bulk-count { font-size: 13px; color: #9aa0a6; }
+.bulk-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.bulk-actions button { padding: 6px 12px; font-size: 13px; }
+.bulk-msg { flex-basis: 100%; font-size: 13px; }
+.bulk-ok { color: #7ee2a8; }
+.bulk-err { color: #f0938f; }
+.bulkbar input[type='checkbox'],
+.card-select input[type='checkbox'] { width: 16px; height: 16px; accent-color: #3b82f6; cursor: pointer; }
+
+/* Per-card selection checkbox */
+.card-select { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px; color: #9aa0a6; cursor: pointer; }
+.card-selected { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f6 inset; }

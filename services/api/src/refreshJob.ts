@@ -59,9 +59,11 @@ export function startRefresh(): { started: boolean; state: RefreshState } {
         message:
           result.created > 0
             ? `Added ${result.created} new card(s) to review.`
-            : result.inserted > 0
-              ? `Fetched ${result.inserted} new article(s), but none were recent enough to summarize.`
-              : 'No new articles found.',
+            : result.skipped > 0
+              ? `Fetched articles, but couldn't summarize any (${result.skipped} failed — check the LLM key and API logs).`
+              : result.inserted > 0
+                ? `Fetched ${result.inserted} new article(s), but none were recent enough to summarize.`
+                : 'No new articles found.',
         finishedAt: new Date().toISOString(),
         result,
       };

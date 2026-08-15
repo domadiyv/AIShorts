@@ -13,6 +13,15 @@ export function activeModel(): string {
   return process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
 }
 
+// Is a real LLM usable right now? True only when the active provider has its key.
+// When false, the worker uses an extractive (no-AI) fallback instead of throwing,
+// so "Fetch new articles" always produces reviewable cards.
+export function llmAvailable(): boolean {
+  return activeProvider() === 'anthropic'
+    ? !!process.env.ANTHROPIC_API_KEY
+    : !!process.env.GROQ_API_KEY;
+}
+
 // Send a system + user prompt and return the model's reply text.
 // Both providers are asked for a single JSON object (the caller parses it).
 export async function chatJson(system: string, user: string): Promise<string> {
@@ -27,21 +36,34 @@ async function groq(system: string, user: string): Promise<string> {
   const key = process.env.GROQ_API_KEY;
   if (!key) throw new Error('GROQ_API_KEY is not set — add it to .env');
   const backoffs = [1500, 4000, 8000, 15000, 25000];
+  // Per-request cap: a stalled connection must not hang the whole pipeline.
+  const REQUEST_TIMEOUT_MS = 30000;
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: activeModel(),
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.4,
-        max_tokens: 700,
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: activeModel(),
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user },
+          ],
+          response_format: { type: 'json_object' },
+          temperature: 0.4,
+          max_tokens: 700,
+        }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      // A timeout/network drop is transient — retry with backoff like a 5xx.
+      if (attempt < backoffs.length) {
+        await sleep(backoffs[attempt]);
+        continue;
+      }
+      throw new Error(`Groq request failed: ${(err as Error).message}`);
+    }
     if (res.ok) {
       const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
       return data.choices?.[0]?.message?.content ?? '';

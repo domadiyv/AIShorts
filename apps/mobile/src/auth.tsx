@@ -1,6 +1,20 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { apiGoogle, apiLogin, apiRegister, type AuthUser } from './api';
+
+// Real Google Sign-In (native). expo-auth-session's Google provider is deprecated
+// in SDK 54; Google/Expo now recommend this library. It needs a native build
+// (our local APK via `expo prebuild` — not Expo Go), so we import it lazily and
+// fall back to the mock identity when it's unavailable (e.g. web/Expo Go) or when
+// no web client ID is configured.
+//
+// GOOGLE_WEB_CLIENT_ID must be the OAuth "Web application" client ID, and must
+// match the server's GOOGLE_CLIENT_ID (the id_token's `aud`). The Android OAuth
+// client (registered with the APK's SHA-1) makes native sign-in work but isn't
+// passed here — Google matches it by package name + SHA-1.
+const GOOGLE_WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID ?? '';
+const googleConfigured = GOOGLE_WEB_CLIENT_ID.length > 0 && Platform.OS !== 'web';
 
 // Persist the session so the user stays logged in across app restarts.
 const TOKEN_KEY = 'aishorts.auth.token.v1';
@@ -42,6 +56,35 @@ const MOCK_GOOGLE_IDENTITY = {
   name: 'Demo Google User',
   picture: 'https://i.pravatar.cc/150?img=68',
 };
+
+// Configure the native Google client once (idempotent-ish; cheap to repeat).
+let googleConfigured_ = false;
+function configureGoogle(mod: typeof import('@react-native-google-signin/google-signin')): void {
+  if (googleConfigured_) return;
+  mod.GoogleSignin.configure({ webClientId: GOOGLE_WEB_CLIENT_ID });
+  googleConfigured_ = true;
+}
+
+// Run the real native Google flow and return a Google id_token, or null if the
+// native module isn't available in this build (falls back to the mock).
+async function nativeGoogleIdToken(): Promise<string | null> {
+  if (!googleConfigured) return null;
+  let mod: typeof import('@react-native-google-signin/google-signin');
+  try {
+    // Lazy require: importing the native module on web/Expo Go would throw.
+    mod = require('@react-native-google-signin/google-signin');
+  } catch {
+    return null;
+  }
+  configureGoogle(mod);
+  await mod.GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+  const res = await mod.GoogleSignin.signIn();
+  if (mod.isSuccessResponse(res)) {
+    return res.data.idToken ?? (await mod.GoogleSignin.getTokens()).idToken ?? null;
+  }
+  // User cancelled the sheet.
+  throw new Error('google_cancelled');
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -92,7 +135,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signInWithGoogle = useCallback(async () => {
-    const idToken = toBase64Url(JSON.stringify(MOCK_GOOGLE_IDENTITY));
+    // Real native Google when configured; otherwise the mock demo identity so the
+    // web preview and unconfigured dev builds still work.
+    const realToken = await nativeGoogleIdToken();
+    const idToken = realToken ?? toBase64Url(JSON.stringify(MOCK_GOOGLE_IDENTITY));
     await persist(await apiGoogle(idToken));
   }, [persist]);
 

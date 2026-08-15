@@ -20,8 +20,8 @@ import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-cont
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
 import * as WebBrowser from 'expo-web-browser';
-import { CATEGORIES } from './src/config';
-import { fetchFeed, recordEvent } from './src/api';
+import { CATEGORIES, getApiBase, setApiBase, loadApiBase, DEFAULT_API_URL } from './src/config';
+import { fetchFeed, recordEvent, resolveMediaUrl } from './src/api';
 import { getBookmarks, toggleBookmark } from './src/bookmarks';
 import { getReads, markRead, markReadMany } from './src/reads';
 import { AuthProvider, useAuth } from './src/auth';
@@ -44,11 +44,67 @@ function formatDate(iso: string | null): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+// Page through the feed until we collect at least `minUnread` cards the user
+// hasn't read yet, or the server runs out. Read cards are filtered client-side,
+// so as the local history grows a single page can come back mostly (or entirely)
+// filtered out — without this the feed would look empty even though the server
+// still has plenty of unread cards. (No-login: history lives only on-device.)
+async function fetchUnreadPage(opts: {
+  category?: string;
+  cursor?: string | null;
+  readIds: Set<string>;
+  minUnread?: number;
+  maxPages?: number;
+}): Promise<{ cards: Card[]; nextCursor: string | null }> {
+  const minUnread = opts.minUnread ?? 5;
+  const maxPages = opts.maxPages ?? 10;
+  let cursor: string | undefined = opts.cursor ?? undefined;
+  const collected: Card[] = [];
+  let nextCursor: string | null = cursor ?? null;
+  for (let i = 0; i < maxPages; i++) {
+    const res = await fetchFeed({ category: opts.category, cursor });
+    nextCursor = res.nextCursor;
+    for (const c of res.cards) {
+      if (!opts.readIds.has(c.id)) collected.push(c);
+    }
+    if (!res.nextCursor) break; // no more pages on the server
+    cursor = res.nextCursor;
+    if (collected.length >= minUnread) break; // enough unread to show
+  }
+  return { cards: collected, nextCursor };
+}
+
 function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} style={[styles.chip, active && styles.chipOn]}>
       <Text style={[styles.chipText, active && styles.chipTextOn]}>{label}</Text>
     </Pressable>
+  );
+}
+
+// Dependency-free bottom fade: a stack of same-color layers of increasing height,
+// each slightly opaque, so overlap builds up a gradient (opaque at the bottom,
+// transparent toward the top). Signals "there's more to scroll" without pulling
+// in a native gradient library. `pointerEvents=none` so it never eats scroll.
+function ScrollFade({ height = 26, color = '#f5f6f8' }: { height?: number; color?: string }) {
+  const layers = 7;
+  return (
+    <View pointerEvents="none" style={[styles.scrollFade, { height }]}>
+      {Array.from({ length: layers }).map((_, i) => (
+        <View
+          key={i}
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: (height * (i + 1)) / layers,
+            backgroundColor: color,
+            opacity: 0.22,
+          }}
+        />
+      ))}
+    </View>
   );
 }
 
@@ -68,9 +124,37 @@ function CardView({
   onOpen: (c: Card) => void;
 }) {
   const date = formatDate(card.publishedAt);
+  // Responsive sizing so the full summary stays readable on every screen size.
+  // One card == one screen (paged feed), and `height` is the measured card
+  // height for THIS device, so deriving sizes from it adapts automatically:
+  // small Androids get a tighter layout (more room for text), big iPhones/
+  // tablets get larger type. The goal is to fit the whole summary WITHOUT
+  // scrolling on typical devices — the image shrinks first — and only fall back
+  // to an in-card scroll for the rare very-long-summary / very-short-screen case.
+  const short = height > 0 && height < 720; // compact phones (e.g. iPhone SE, small Androids)
+  const imageHeight = Math.round(Math.max(80, Math.min(132, height * 0.13)));
+  const titleSize = short ? 18 : 21;
+  const titleLineHeight = short ? 23 : 27;
+  const summarySize = short ? 14 : 16;
+  const summaryLineHeight = short ? 20 : 23;
+
+  // The summary lives in a ScrollView so the full text is ALWAYS reachable even
+  // when it can't fit. `overflow` tracks whether it actually exceeds the visible
+  // box, so the fade/indicator only appear when there's genuinely more to scroll
+  // (no misleading fade when everything already fits).
+  const [overflow, setOverflow] = useState(false);
+  const summaryViewH = useRef(0);
+  const onSummaryLayout = (e: LayoutChangeEvent) => {
+    summaryViewH.current = e.nativeEvent.layout.height;
+  };
+  const onSummaryContentSize = (_w: number, h: number) => {
+    setOverflow(h > summaryViewH.current + 1);
+  };
   return (
     <View style={[styles.card, { height }]}>
-      {card.imageUrl ? <Image source={{ uri: card.imageUrl }} style={styles.image} /> : null}
+      {resolveMediaUrl(card.imageUrl) ? (
+        <Image source={{ uri: resolveMediaUrl(card.imageUrl)! }} style={[styles.image, { height: imageHeight }]} />
+      ) : null}
       <View style={styles.cardBody}>
         <View style={styles.badges}>
           <View style={styles.badgeGroup}>
@@ -104,21 +188,42 @@ function CardView({
             </Pressable>
           </View>
         </View>
-        <Text style={styles.title}>{card.title}</Text>
-        <ScrollView style={styles.summaryScroll} showsVerticalScrollIndicator={false}>
-          <Text style={styles.summary}>{card.summary}</Text>
-          {card.whyItMatters ? (
-            <Text style={styles.why}>Why it matters: {card.whyItMatters}</Text>
-          ) : null}
-          <View style={styles.credit}>
-            <Text style={styles.creditLabel}>Source</Text>
-            <Text style={styles.creditSource} numberOfLines={1}>
-              {card.sourceName}
+        <Text
+          style={[styles.title, { fontSize: titleSize, lineHeight: titleLineHeight }]}
+          numberOfLines={short ? 3 : 4}
+        >
+          {card.title}
+        </Text>
+        {/* The whole summary always fits on typical devices. If it can't (very
+            long text on a very short screen), it scrolls IN-CARD — nestedScroll
+            is required on Android for a ScrollView inside the paged FlatList, and
+            the fade/indicator appear only when there's actually more to see. */}
+        <View style={styles.summaryWrap} onLayout={onSummaryLayout}>
+          <ScrollView
+            style={styles.summaryScroll}
+            contentContainerStyle={styles.summaryScrollContent}
+            nestedScrollEnabled
+            showsVerticalScrollIndicator={overflow}
+            indicatorStyle="black"
+            onContentSizeChange={onSummaryContentSize}
+          >
+            <Text style={[styles.summary, { fontSize: summarySize, lineHeight: summaryLineHeight }]}>
+              {card.summary}
             </Text>
-            {date ? <Text style={styles.creditDot}>·</Text> : null}
-            {date ? <Text style={styles.creditDate}>{date}</Text> : null}
-          </View>
-        </ScrollView>
+            {card.whyItMatters ? (
+              <Text style={styles.why}>Why it matters: {card.whyItMatters}</Text>
+            ) : null}
+            <View style={styles.credit}>
+              <Text style={styles.creditLabel}>Source</Text>
+              <Text style={styles.creditSource} numberOfLines={1}>
+                {card.sourceName}
+              </Text>
+              {date ? <Text style={styles.creditDot}>·</Text> : null}
+              {date ? <Text style={styles.creditDate}>{date}</Text> : null}
+            </View>
+          </ScrollView>
+          {overflow ? <ScrollFade /> : null}
+        </View>
         <Pressable style={styles.readCta} onPress={() => onOpen(card)}>
           <View style={styles.readCtaText}>
             <Text style={styles.readCtaKicker}>CONTINUE READING</Text>
@@ -232,6 +337,7 @@ function ProfileMenu({
   onNavigate,
   onAuth,
   onLogout,
+  onSettings,
 }: {
   user: AuthUser | null;
   savedCount: number;
@@ -240,6 +346,7 @@ function ProfileMenu({
   onNavigate: (tab: Tab) => void;
   onAuth: (mode: 'login' | 'register') => void;
   onLogout: () => void;
+  onSettings: () => void;
 }) {
   return (
     <>
@@ -275,6 +382,8 @@ function ProfileMenu({
           label={`History${readCount ? ` (${readCount})` : ''}`}
           onPress={() => onNavigate('read')}
         />
+        <View style={styles.menuDivider} />
+        <MenuItem label="Settings" onPress={onSettings} />
         <View style={styles.menuDivider} />
         {user ? (
           <MenuItem label="Log out" danger onPress={onLogout} />
@@ -434,10 +543,82 @@ function AuthModal({
   );
 }
 
+// Runtime API URL override. Lets a single installed build point at the Mac tunnel
+// now and a cloud URL later WITHOUT rebuilding. Saving reloads the feed so the
+// change takes effect immediately.
+function SettingsModal({
+  onClose,
+  onSaved,
+}: {
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [url, setUrl] = useState(getApiBase());
+  const [busy, setBusy] = useState(false);
+
+  const save = async (value: string) => {
+    setBusy(true);
+    try {
+      await setApiBase(value);
+      onSaved();
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <View style={styles.modalOverlay}>
+      <Pressable style={styles.modalBackdrop} onPress={onClose} />
+      <View style={styles.modalCard}>
+        <Pressable onPress={onClose} style={styles.modalClose} hitSlop={10}>
+          <Text style={styles.modalCloseText}>✕</Text>
+        </Pressable>
+        <Text style={styles.modalTitle}>Server settings</Text>
+        <Text style={styles.modalSub}>
+          Point the app at your backend. Use the HTTPS tunnel to your Mac now, or a
+          cloud URL later — no reinstall needed.
+        </Text>
+
+        <TextInput
+          style={styles.input}
+          placeholder="https://your-backend.example.com"
+          placeholderTextColor="#9aa3b2"
+          value={url}
+          onChangeText={setUrl}
+          autoCapitalize="none"
+          autoCorrect={false}
+          keyboardType="url"
+          onSubmitEditing={() => save(url)}
+        />
+
+        <Text style={styles.settingsHint}>Default: {DEFAULT_API_URL}</Text>
+
+        <Pressable
+          style={[styles.primaryBtn, busy && styles.primaryBtnDisabled]}
+          onPress={() => save(url)}
+          disabled={busy}
+        >
+          {busy ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.primaryBtnText}>Save & reload</Text>
+          )}
+        </Pressable>
+
+        <Pressable onPress={() => save('')} style={styles.switchRow} disabled={busy}>
+          <Text style={styles.switchText}>Reset to default</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 function Feed() {
   const insets = useSafeAreaInsets();
   const { user, logout } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register' | null>(null);
   const [tab, setTab] = useState<Tab>('feed');
   const [category, setCategory] = useState<string | undefined>();
@@ -474,12 +655,14 @@ function Feed() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [res, currentReads] = await Promise.all([fetchFeed({ category }), getReads()]);
+      const currentReads = await getReads();
       const readSet = new Set(currentReads.map((c) => c.id));
       setReads(currentReads);
       // Filter already-read cards out at fetch time (not live), so opening or
-      // scrolling past a card doesn't yank it from under you mid-session.
-      setCards(res.cards.filter((c) => !readSet.has(c.id)));
+      // scrolling past a card doesn't yank it from under you mid-session. Page
+      // ahead so a large history doesn't leave the first page empty.
+      const res = await fetchUnreadPage({ category, readIds: readSet });
+      setCards(res.cards);
       setNextCursor(res.nextCursor);
       maxSeenRef.current = 0;
     } catch {
@@ -513,13 +696,11 @@ function Feed() {
       } else if (tab === 'read') {
         setReads(await getReads());
       } else {
-        const [res, currentReads] = await Promise.all([
-          fetchFeed({ category }),
-          getReads(),
-        ]);
+        const currentReads = await getReads();
         const readSet = new Set(currentReads.map((c) => c.id));
         setReads(currentReads);
-        setCards(res.cards.filter((c) => !readSet.has(c.id)));
+        const res = await fetchUnreadPage({ category, readIds: readSet });
+        setCards(res.cards);
         setNextCursor(res.nextCursor);
         maxSeenRef.current = 0;
       }
@@ -534,11 +715,14 @@ function Feed() {
     if (tab !== 'feed' || !nextCursor || loadingMore) return;
     setLoadingMore(true);
     try {
-      const res = await fetchFeed({ category, cursor: nextCursor });
       const currentReads = await getReads();
       const readSet = new Set(currentReads.map((c) => c.id));
-      const fresh = res.cards.filter((c) => !readSet.has(c.id));
-      setCards((prev) => [...prev, ...fresh]);
+      const res = await fetchUnreadPage({ category, cursor: nextCursor, readIds: readSet });
+      // Dedup against what's already on screen (paging overlap is possible).
+      setCards((prev) => {
+        const existing = new Set(prev.map((c) => c.id));
+        return [...prev, ...res.cards.filter((c) => !existing.has(c.id))];
+      });
       setNextCursor(res.nextCursor);
     } catch {
       /* ignore */
@@ -581,7 +765,7 @@ function Feed() {
   };
 
   return (
-    <View style={[styles.root, { paddingTop: insets.top }]}>
+    <View style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       <View style={styles.header}>
         <View style={styles.brandRow}>
           <View style={styles.brandBlock}>
@@ -608,6 +792,10 @@ function Feed() {
                 }}
                 onLogout={() => {
                   logout();
+                  setMenuOpen(false);
+                }}
+                onSettings={() => {
+                  setSettingsOpen(true);
                   setMenuOpen(false);
                 }}
               />
@@ -731,17 +919,34 @@ function Feed() {
           onSwitchMode={setAuthMode}
         />
       ) : null}
+
+      {settingsOpen ? (
+        <SettingsModal onClose={() => setSettingsOpen(false)} onSaved={load} />
+      ) : null}
     </View>
   );
 }
 
 export default function App() {
+  // Load any persisted API URL override before the first request fires, so the
+  // feed talks to the right backend from the very first fetch.
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    loadApiBase().finally(() => setReady(true));
+  }, []);
+
   return (
     <SafeAreaProvider>
       <StatusBar style="dark" />
-      <AuthProvider>
-        <Feed />
-      </AuthProvider>
+      {ready ? (
+        <AuthProvider>
+          <Feed />
+        </AuthProvider>
+      ) : (
+        <View style={styles.center}>
+          <ActivityIndicator />
+        </View>
+      )}
     </SafeAreaProvider>
   );
 }
@@ -833,13 +1038,14 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   empty: { color: '#6b7280', textAlign: 'center', fontSize: 15 },
   card: { paddingHorizontal: 16, paddingTop: 14 },
-  image: { width: '100%', height: 180, borderRadius: 14, backgroundColor: '#e9edf2', marginBottom: 14 },
-  cardBody: { flex: 1, paddingBottom: 18 },
+  // height is set responsively inline (per device) in CardView.
+  image: { width: '100%', borderRadius: 14, backgroundColor: '#e9edf2', marginBottom: 10 },
+  cardBody: { flex: 1, paddingBottom: 12 },
   badges: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 12,
+    marginBottom: 8,
   },
   badgeGroup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   cardActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
@@ -857,18 +1063,22 @@ const styles = StyleSheet.create({
   badge: { paddingVertical: 3, paddingHorizontal: 8, borderRadius: 6 },
   badgeText: { fontSize: 11, fontWeight: '600', textTransform: 'capitalize' },
   title: {
-    fontSize: 24,
+    // fontSize / lineHeight set responsively inline in CardView.
     fontWeight: '700',
     color: '#14161a',
-    lineHeight: 30,
-    marginBottom: 12,
+    marginBottom: 8,
     letterSpacing: -0.3,
   },
+  // Wrapper gives the fade an anchor at the bottom of the scroll region.
+  summaryWrap: { flex: 1, position: 'relative' },
   summaryScroll: { flex: 1 },
-  summary: { fontSize: 18, lineHeight: 28, color: '#23262b' },
-  why: { fontSize: 14, color: '#6b7280', marginTop: 14, fontStyle: 'italic' },
+  // Bottom padding so the last line clears the fade overlay and the CTA.
+  summaryScrollContent: { paddingBottom: 22 },
+  scrollFade: { position: 'absolute', left: 0, right: 0, bottom: 0 },
+  summary: { color: '#23262b' }, // fontSize / lineHeight set responsively inline
+  why: { fontSize: 13, color: '#6b7280', marginTop: 10, fontStyle: 'italic', lineHeight: 19 },
   // Source label + source name + article date — one baseline, cohesive type.
-  credit: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 16 },
+  credit: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 12 },
   creditLabel: { fontSize: 12, lineHeight: 16, color: '#9aa3b2', fontWeight: '500' },
   creditSource: { fontSize: 12, lineHeight: 16, fontWeight: '600', color: '#6b7280', flexShrink: 1 },
   creditDot: { fontSize: 12, lineHeight: 16, color: '#c2c8d0' },
@@ -880,9 +1090,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     backgroundColor: '#2563eb',
     borderRadius: 16,
-    paddingVertical: 15,
+    paddingVertical: 13,
     paddingHorizontal: 18,
-    marginTop: 14,
+    marginTop: 12,
     shadowColor: '#2563eb',
     shadowOpacity: 0.28,
     shadowRadius: 14,
@@ -994,4 +1204,5 @@ const styles = StyleSheet.create({
   primaryBtnText: { color: '#ffffff', fontSize: 15, fontWeight: '700' },
   switchRow: { alignItems: 'center', marginTop: 16 },
   switchText: { fontSize: 14, color: '#2563eb', fontWeight: '600' },
+  settingsHint: { fontSize: 12, color: '#9aa3b2', marginTop: 10, marginBottom: 4 },
 });

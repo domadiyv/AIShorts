@@ -1,0 +1,105 @@
+# AIShorts — self-contained backend stack (Linux).
+#
+#   docker compose up --build              # postgres + migrate/seed + api + admin
+#   docker compose --profile jobs run --rm worker            # full ingest+summarize
+#   docker compose --profile jobs run --rm worker "npx tsx services/worker/src/summarize.ts"
+#
+# Data lives in the named `pgdata` volume (survives `down`/`up`). Media files
+# downloaded by the worker live in the `media` volume, served by the API at /media.
+# Real secrets/keys come from the host .env (env_file); DATABASE_URL is overridden
+# here to point at the postgres container instead of whatever the host .env uses.
+name: aishorts
+
+x-db-url: &db-url >-
+  postgresql://${POSTGRES_USER:-aishorts}:${POSTGRES_PASSWORD:-aishorts}@postgres:5432/${POSTGRES_DB:-aishorts}?schema=public
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aishorts}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aishorts}
+      POSTGRES_DB: ${POSTGRES_DB:-aishorts}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Host 5433 by default to avoid clashing with a local Homebrew Postgres on 5432.
+      - "${POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aishorts} -d ${POSTGRES_DB:-aishorts}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: apply migrations, then seed demo cards (seed is idempotent — it only
+  # manages its own __seed__ rows and leaves real/imported cards untouched).
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: *db-url
+    command: ["sh", "-lc", "npx prisma migrate deploy --schema packages/shared/prisma/schema.prisma && npx tsx packages/shared/prisma/seed.ts"]
+    restart: "no"
+
+  api:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      DATABASE_URL: *db-url
+      API_PORT: "4000"
+    ports:
+      - "4000:4000"
+    volumes:
+      - media:/app/services/api/media
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:4000/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+    command: ["npx", "tsx", "services/api/src/server.ts"]
+
+  admin:
+    build: .
+    depends_on:
+      api:
+        condition: service_started
+    env_file: .env
+    environment:
+      DATABASE_URL: *db-url
+      API_URL: http://api:4000
+    ports:
+      - "4001:4001"
+    restart: unless-stopped
+    # Runs the Next.js panel in dev mode (matches local workflow; avoids build-time
+    # static-generation against a not-yet-running API).
+    command: ["sh", "-lc", "cd apps/admin && npx next dev -p 4001 -H 0.0.0.0"]
+
+  # Manual RSS ingest + summarize. Not a long-running service; invoke on demand:
+  #   docker compose --profile jobs run --rm worker
+  worker:
+    build: .
+    profiles: ["jobs"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: *db-url
+    volumes:
+      # Same media volume the API serves from, so downloaded images are visible
+      # to /media/* immediately (ingest/summarize + backfill:media write here).
+      - media:/app/services/api/media
+    entrypoint: ["sh", "-lc"]
+    command: ["npx tsx services/worker/src/index.ts"]
+
+volumes:
+  pgdata:
+  media:

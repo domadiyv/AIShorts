@@ -319,8 +319,21 @@ async function main() {
   });
   void source;
 
-  // Clear previously seeded demo cards so re-running stays idempotent.
-  await prisma.card.deleteMany({ where: { sourceUrl: { contains: '' }, rawItemId: null, tags: { has: '__seed__' } } });
+  // Clear previously seeded demo cards so re-running stays idempotent. Scoped to
+  // the '__seed__' tag so real (ingested/summarized) cards are never touched.
+  // Child rows (events/bookmarks) reference Card with no DB cascade, so delete
+  // them first — otherwise the FK constraint blocks the card delete once anyone
+  // has viewed or bookmarked a seed card.
+  const oldSeeds = await prisma.card.findMany({
+    where: { rawItemId: null, tags: { has: '__seed__' } },
+    select: { id: true },
+  });
+  if (oldSeeds.length) {
+    const ids = oldSeeds.map((c) => c.id);
+    await prisma.cardEvent.deleteMany({ where: { cardId: { in: ids } } });
+    await prisma.bookmark.deleteMany({ where: { cardId: { in: ids } } });
+    await prisma.card.deleteMany({ where: { id: { in: ids } } });
+  }
 
   const now = Date.now();
   let i = 0;
@@ -336,7 +349,9 @@ async function main() {
         category: c.category,
         difficulty: c.difficulty,
         tags: [...c.tags, '__seed__'],
-        imageUrl: `https://picsum.photos/seed/${c.imageSeed}/800/450`,
+        // Self-hosted, offline-safe placeholder bundled under media/seed/ and
+        // served by the API at /media/seed/<category>.png. No external hotlink.
+        imageUrl: `/media/seed/${c.category.toLowerCase().replace(/[^a-z0-9]+/g, '-')}.png`,
         sourceName: c.sourceName,
         sourceUrl: c.sourceUrl,
         status: 'published',
