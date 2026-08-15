@@ -16,6 +16,7 @@ import {
 } from '@aishorts/shared';
 import { cacheGet, cacheSet, feedCacheVersion, bumpFeedCacheVersion } from './redis';
 import { getRefreshState, startRefresh } from './refreshJob';
+import { registerAuthRoutes } from './auth';
 
 const PORT = Number(process.env.API_PORT ?? 4000);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? '';
@@ -78,6 +79,8 @@ async function build() {
   });
 
   app.get('/v1/health', async () => ({ ok: true, time: new Date().toISOString() }));
+
+  registerAuthRoutes(app);
 
   app.get('/v1/categories', async () => ({
     categories: CATEGORIES,

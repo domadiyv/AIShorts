@@ -15,6 +15,43 @@ export async function fetchFeed(
   return (await res.json()) as FeedResponse;
 }
 
+// ---- Auth ----
+export type AuthUser = {
+  id: string;
+  email: string | null;
+  name: string | null;
+  avatarUrl: string | null;
+  provider: string;
+};
+export type AuthResponse = { token: string; user: AuthUser };
+
+async function authPost(path: string, body: unknown): Promise<AuthResponse> {
+  const res = await fetch(`${API_URL}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as AuthResponse & { error?: string };
+  if (!res.ok) throw new Error(data?.error || `request failed: ${res.status}`);
+  return data;
+}
+
+export function apiRegister(input: {
+  email: string;
+  password: string;
+  name?: string;
+}): Promise<AuthResponse> {
+  return authPost('/v1/auth/register', input);
+}
+
+export function apiLogin(input: { email: string; password: string }): Promise<AuthResponse> {
+  return authPost('/v1/auth/login', input);
+}
+
+export function apiGoogle(idToken: string): Promise<AuthResponse> {
+  return authPost('/v1/auth/google', { idToken });
+}
+
 // Fire-and-forget analytics (view / read_more / share / bookmark).
 export function recordEvent(cardId: string, type: string): void {
   fetch(`${API_URL}/v1/events`, {

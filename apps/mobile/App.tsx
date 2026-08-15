@@ -1,22 +1,31 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
   Image,
+  Platform,
   Pressable,
   RefreshControl,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
+  TextInput,
   View,
   type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { Ionicons } from '@expo/vector-icons';
 import * as WebBrowser from 'expo-web-browser';
-import { CATEGORIES, DIFFICULTIES } from './src/config';
+import { CATEGORIES } from './src/config';
 import { fetchFeed, recordEvent } from './src/api';
 import { getBookmarks, toggleBookmark } from './src/bookmarks';
+import { getReads, markRead, markReadMany } from './src/reads';
+import { AuthProvider, useAuth } from './src/auth';
+import type { AuthUser } from './src/api';
 import type { Card } from './src/types';
 
 const DIFF_COLORS: Record<string, string> = {
@@ -24,6 +33,16 @@ const DIFF_COLORS: Record<string, string> = {
   intermediate: '#b45309',
   advanced: '#b91c1c',
 };
+
+type Tab = 'feed' | 'saved' | 'read';
+
+// Human-readable article date, e.g. "Jul 26, 2026". Empty string if unknown.
+function formatDate(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
 
 function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
   return (
@@ -38,26 +57,51 @@ function CardView({
   height,
   saved,
   onToggleSave,
+  onShare,
   onOpen,
 }: {
   card: Card;
   height: number;
   saved: boolean;
   onToggleSave: (c: Card) => void;
+  onShare: (c: Card) => void;
   onOpen: (c: Card) => void;
 }) {
+  const date = formatDate(card.publishedAt);
   return (
     <View style={[styles.card, { height }]}>
       {card.imageUrl ? <Image source={{ uri: card.imageUrl }} style={styles.image} /> : null}
       <View style={styles.cardBody}>
         <View style={styles.badges}>
-          <View style={[styles.badge, { backgroundColor: '#eef2ff' }]}>
-            <Text style={[styles.badgeText, { color: '#4338ca' }]}>{card.category}</Text>
+          <View style={styles.badgeGroup}>
+            <View style={[styles.badge, { backgroundColor: '#eef2ff' }]}>
+              <Text style={[styles.badgeText, { color: '#4338ca' }]}>{card.category}</Text>
+            </View>
+            <View style={[styles.badge, { backgroundColor: '#f1f3f5' }]}>
+              <Text style={[styles.badgeText, { color: DIFF_COLORS[card.difficulty] ?? '#444' }]}>
+                {card.difficulty}
+              </Text>
+            </View>
           </View>
-          <View style={[styles.badge, { backgroundColor: '#f1f3f5' }]}>
-            <Text style={[styles.badgeText, { color: DIFF_COLORS[card.difficulty] ?? '#444' }]}>
-              {card.difficulty}
-            </Text>
+          <View style={styles.cardActions}>
+            <Pressable style={styles.iconBtn} onPress={() => onShare(card)} hitSlop={8}>
+              <Ionicons
+                name={Platform.OS === 'android' ? 'share-social-outline' : 'share-outline'}
+                size={19}
+                color="#6b7280"
+              />
+            </Pressable>
+            <Pressable
+              style={[styles.iconBtn, saved && styles.iconBtnOn]}
+              onPress={() => onToggleSave(card)}
+              hitSlop={8}
+            >
+              <Ionicons
+                name={saved ? 'star' : 'star-outline'}
+                size={19}
+                color={saved ? '#2563eb' : '#6b7280'}
+              />
+            </Pressable>
           </View>
         </View>
         <Text style={styles.title}>{card.title}</Text>
@@ -66,22 +110,325 @@ function CardView({
           {card.whyItMatters ? (
             <Text style={styles.why}>Why it matters: {card.whyItMatters}</Text>
           ) : null}
-        </ScrollView>
-        <View style={styles.foot}>
-          <Text style={styles.src} numberOfLines={1}>
-            {card.sourceName}
-          </Text>
-          <View style={styles.footActions}>
-            <Pressable onPress={() => onToggleSave(card)} hitSlop={10}>
-              <Text style={[styles.save, saved && styles.saveOn]}>
-                {saved ? '★ Saved' : '☆ Save'}
-              </Text>
-            </Pressable>
-            <Pressable onPress={() => onOpen(card)} hitSlop={10}>
-              <Text style={styles.read}>Read full →</Text>
-            </Pressable>
+          <View style={styles.credit}>
+            <Text style={styles.creditLabel}>Source</Text>
+            <Text style={styles.creditSource} numberOfLines={1}>
+              {card.sourceName}
+            </Text>
+            {date ? <Text style={styles.creditDot}>·</Text> : null}
+            {date ? <Text style={styles.creditDate}>{date}</Text> : null}
           </View>
+        </ScrollView>
+        <Pressable style={styles.readCta} onPress={() => onOpen(card)}>
+          <View style={styles.readCtaText}>
+            <Text style={styles.readCtaKicker}>CONTINUE READING</Text>
+            <Text style={styles.readCtaTitle} numberOfLines={1}>
+              Read the full story on {card.sourceName}
+            </Text>
+          </View>
+          <View style={styles.readCtaArrowWrap}>
+            <Text style={styles.readCtaArrow}>→</Text>
+          </View>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+// A single vertically-paged card list. Extracted so each tab can own its own
+// FlatList instance — that's what lets the Feed keep its scroll position while
+// you visit other tabs (the instance stays mounted, just hidden).
+function CardList({
+  data,
+  feedHeight,
+  savedIds,
+  refreshing,
+  onRefresh,
+  onToggleSave,
+  onShare,
+  onOpen,
+  onEndReached,
+  onScroll,
+}: {
+  data: Card[];
+  feedHeight: number;
+  savedIds: Set<string>;
+  refreshing: boolean;
+  onRefresh: () => void;
+  onToggleSave: (c: Card) => void;
+  onShare: (c: Card) => void;
+  onOpen: (c: Card) => void;
+  onEndReached?: () => void;
+  onScroll?: (e: NativeScrollEvent) => void;
+}) {
+  return (
+    <FlatList
+      data={data}
+      keyExtractor={(c) => c.id}
+      pagingEnabled
+      showsVerticalScrollIndicator={false}
+      snapToInterval={feedHeight}
+      decelerationRate="fast"
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+      onEndReachedThreshold={0.5}
+      onEndReached={onEndReached}
+      scrollEventThrottle={16}
+      onScroll={onScroll ? (e: NativeSyntheticEvent<NativeScrollEvent>) => onScroll(e.nativeEvent) : undefined}
+      renderItem={({ item }) => (
+        <CardView
+          card={item}
+          height={feedHeight}
+          saved={savedIds.has(item.id)}
+          onToggleSave={onToggleSave}
+          onShare={onShare}
+          onOpen={onOpen}
+        />
+      )}
+    />
+  );
+}
+
+// Round avatar: photo if we have one, else an initial, else a guest glyph.
+function Avatar({ user, size = 36 }: { user: AuthUser | null; size?: number }) {
+  const dim = { width: size, height: size, borderRadius: size / 2 };
+  if (user?.avatarUrl) return <Image source={{ uri: user.avatarUrl }} style={[styles.avatarImg, dim]} />;
+  if (user) {
+    const label = (user.name || user.email || '?').trim().charAt(0).toUpperCase();
+    return (
+      <View style={[styles.avatarCircle, dim]}>
+        <Text style={[styles.avatarInitial, { fontSize: size * 0.42 }]}>{label}</Text>
+      </View>
+    );
+  }
+  return (
+    <View style={[styles.avatarCircle, styles.avatarGuest, dim]}>
+      <Text style={{ fontSize: size * 0.5 }}>👤</Text>
+    </View>
+  );
+}
+
+function MenuItem({
+  label,
+  onPress,
+  danger,
+}: {
+  label: string;
+  onPress: () => void;
+  danger?: boolean;
+}) {
+  return (
+    <Pressable style={styles.menuItem} onPress={onPress}>
+      <Text style={[styles.menuItemText, danger && styles.menuItemDanger]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+// Dropdown anchored under the header avatar. Saved + History live here now.
+function ProfileMenu({
+  user,
+  savedCount,
+  readCount,
+  onClose,
+  onNavigate,
+  onAuth,
+  onLogout,
+}: {
+  user: AuthUser | null;
+  savedCount: number;
+  readCount: number;
+  onClose: () => void;
+  onNavigate: (tab: Tab) => void;
+  onAuth: (mode: 'login' | 'register') => void;
+  onLogout: () => void;
+}) {
+  return (
+    <>
+      <Pressable style={styles.menuBackdrop} onPress={onClose} />
+      <View style={styles.menu}>
+        {user ? (
+          <View style={styles.menuHeader}>
+            <Avatar user={user} size={40} />
+            <View style={styles.menuHeaderText}>
+              <Text style={styles.menuName} numberOfLines={1}>
+                {user.name || 'Your account'}
+              </Text>
+              {user.email ? (
+                <Text style={styles.menuEmail} numberOfLines={1}>
+                  {user.email}
+                </Text>
+              ) : null}
+            </View>
+          </View>
+        ) : (
+          <View style={styles.menuHeaderText}>
+            <Text style={styles.menuName}>Guest</Text>
+            <Text style={styles.menuEmail}>Not logged in</Text>
+          </View>
+        )}
+        <View style={styles.menuDivider} />
+        <MenuItem label="Feed" onPress={() => onNavigate('feed')} />
+        <MenuItem
+          label={`Saved${savedCount ? ` (${savedCount})` : ''}`}
+          onPress={() => onNavigate('saved')}
+        />
+        <MenuItem
+          label={`History${readCount ? ` (${readCount})` : ''}`}
+          onPress={() => onNavigate('read')}
+        />
+        <View style={styles.menuDivider} />
+        {user ? (
+          <MenuItem label="Log out" danger onPress={onLogout} />
+        ) : (
+          <>
+            <MenuItem label="Log in" onPress={() => onAuth('login')} />
+            <MenuItem label="Register" onPress={() => onAuth('register')} />
+          </>
+        )}
+      </View>
+    </>
+  );
+}
+
+// Map API error codes to human-readable messages.
+function friendlyError(code?: string): string {
+  switch (code) {
+    case 'email_taken':
+      return 'That email is already registered — try logging in.';
+    case 'invalid_credentials':
+      return 'Wrong email or password.';
+    case 'invalid_registration':
+      return 'Enter a valid email and a password of at least 8 characters.';
+    case 'invalid_login':
+      return 'Enter your email and password.';
+    default:
+      return 'Something went wrong. Please try again.';
+  }
+}
+
+// Login / Register overlay with a "Continue with Google" button.
+function AuthModal({
+  mode,
+  onClose,
+  onSwitchMode,
+}: {
+  mode: 'login' | 'register';
+  onClose: () => void;
+  onSwitchMode: (m: 'login' | 'register') => void;
+}) {
+  const { login, register, signInWithGoogle } = useAuth();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [name, setName] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const isRegister = mode === 'register';
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (isRegister) await register(email.trim(), password, name.trim() || undefined);
+      else await login(email.trim(), password);
+      onClose();
+    } catch (e) {
+      setError(friendlyError(e instanceof Error ? e.message : undefined));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const google = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await signInWithGoogle();
+      onClose();
+    } catch (e) {
+      setError(friendlyError(e instanceof Error ? e.message : undefined));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <View style={styles.modalOverlay}>
+      <Pressable style={styles.modalBackdrop} onPress={onClose} />
+      <View style={styles.modalCard}>
+        <Pressable onPress={onClose} style={styles.modalClose} hitSlop={10}>
+          <Text style={styles.modalCloseText}>✕</Text>
+        </Pressable>
+        <Text style={styles.modalTitle}>{isRegister ? 'Create your account' : 'Welcome back'}</Text>
+        <Text style={styles.modalSub}>
+          {isRegister
+            ? 'Register to keep your saved shorts and history.'
+            : 'Log in to continue.'}
+        </Text>
+
+        <Pressable style={styles.googleBtn} onPress={google} disabled={busy}>
+          <View style={styles.googleG}>
+            <Text style={styles.googleGText}>G</Text>
+          </View>
+          <Text style={styles.googleBtnText}>Continue with Google</Text>
+        </Pressable>
+
+        <View style={styles.orRow}>
+          <View style={styles.orLine} />
+          <Text style={styles.orText}>or</Text>
+          <View style={styles.orLine} />
         </View>
+
+        {isRegister ? (
+          <TextInput
+            style={styles.input}
+            placeholder="Name (optional)"
+            placeholderTextColor="#9aa3b2"
+            value={name}
+            onChangeText={setName}
+            autoCapitalize="words"
+          />
+        ) : null}
+        <TextInput
+          style={styles.input}
+          placeholder="Email"
+          placeholderTextColor="#9aa3b2"
+          value={email}
+          onChangeText={setEmail}
+          autoCapitalize="none"
+          keyboardType="email-address"
+          autoComplete="email"
+        />
+        <TextInput
+          style={styles.input}
+          placeholder={isRegister ? 'Password (min 8 characters)' : 'Password'}
+          placeholderTextColor="#9aa3b2"
+          value={password}
+          onChangeText={setPassword}
+          secureTextEntry
+          onSubmitEditing={submit}
+        />
+
+        {error ? <Text style={styles.modalError}>{error}</Text> : null}
+
+        <Pressable
+          style={[styles.primaryBtn, busy && styles.primaryBtnDisabled]}
+          onPress={submit}
+          disabled={busy}
+        >
+          {busy ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.primaryBtnText}>{isRegister ? 'Create account' : 'Log in'}</Text>
+          )}
+        </Pressable>
+
+        <Pressable
+          onPress={() => onSwitchMode(isRegister ? 'login' : 'register')}
+          style={styles.switchRow}
+        >
+          <Text style={styles.switchText}>
+            {isRegister ? 'Already have an account? Log in' : 'New here? Create an account'}
+          </Text>
+        </Pressable>
       </View>
     </View>
   );
@@ -89,32 +436,59 @@ function CardView({
 
 function Feed() {
   const insets = useSafeAreaInsets();
-  const [tab, setTab] = useState<'feed' | 'saved'>('feed');
+  const { user, logout } = useAuth();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register' | null>(null);
+  const [tab, setTab] = useState<Tab>('feed');
   const [category, setCategory] = useState<string | undefined>();
-  const [difficulty, setDifficulty] = useState<string | undefined>();
   const [cards, setCards] = useState<Card[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [bookmarks, setBookmarks] = useState<Card[]>([]);
+  const [reads, setReads] = useState<Card[]>([]);
   const [feedHeight, setFeedHeight] = useState(0);
 
   const savedIds = useMemo(() => new Set(bookmarks.map((c) => c.id)), [bookmarks]);
 
+  // View tracking for the feed: scrolling past a card marks it read (it moves to
+  // the Read tab immediately), but the card stays in the current session's feed
+  // until the next refresh — so the list doesn't reshuffle under your finger.
+  const feedCardsRef = useRef<Card[]>([]);
+  const feedHeightRef = useRef(0);
+  // Highest card index reached so far (starts at the first card, index 0).
+  const maxSeenRef = useRef(0);
+  const onFeedScroll = useRef((e: NativeScrollEvent) => {
+    const h = feedHeightRef.current;
+    if (h <= 0) return;
+    const idx = Math.round(e.contentOffset.y / h); // card currently on screen
+    if (idx <= maxSeenRef.current) return;
+    // Cards between the previous high-water mark and the current card have been
+    // scrolled past → mark them read.
+    const passed = feedCardsRef.current.slice(maxSeenRef.current, idx);
+    maxSeenRef.current = idx;
+    if (passed.length) markReadMany(passed).then(setReads);
+  }).current;
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetchFeed({ category, difficulty });
-      setCards(res.cards);
+      const [res, currentReads] = await Promise.all([fetchFeed({ category }), getReads()]);
+      const readSet = new Set(currentReads.map((c) => c.id));
+      setReads(currentReads);
+      // Filter already-read cards out at fetch time (not live), so opening or
+      // scrolling past a card doesn't yank it from under you mid-session.
+      setCards(res.cards.filter((c) => !readSet.has(c.id)));
       setNextCursor(res.nextCursor);
+      maxSeenRef.current = 0;
     } catch {
       setCards([]);
       setNextCursor(null);
     } finally {
       setLoading(false);
     }
-  }, [category, difficulty]);
+  }, [category]);
 
   useEffect(() => {
     load();
@@ -122,71 +496,132 @@ function Feed() {
 
   useEffect(() => {
     getBookmarks().then(setBookmarks);
+    getReads().then(setReads);
   }, []);
 
+  // Keep the ref the viewability callback reads in sync with the feed data.
+  useEffect(() => {
+    feedCardsRef.current = cards;
+  }, [cards]);
+
+  // Pull-to-refresh: re-fetch whichever list the active tab is showing.
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
       if (tab === 'saved') {
         setBookmarks(await getBookmarks());
+      } else if (tab === 'read') {
+        setReads(await getReads());
       } else {
-        const res = await fetchFeed({ category, difficulty });
-        setCards(res.cards);
+        const [res, currentReads] = await Promise.all([
+          fetchFeed({ category }),
+          getReads(),
+        ]);
+        const readSet = new Set(currentReads.map((c) => c.id));
+        setReads(currentReads);
+        setCards(res.cards.filter((c) => !readSet.has(c.id)));
         setNextCursor(res.nextCursor);
+        maxSeenRef.current = 0;
       }
     } catch {
       /* keep existing */
     } finally {
       setRefreshing(false);
     }
-  }, [tab, category, difficulty]);
+  }, [tab, category]);
 
   const loadMore = useCallback(async () => {
     if (tab !== 'feed' || !nextCursor || loadingMore) return;
     setLoadingMore(true);
     try {
-      const res = await fetchFeed({ category, difficulty, cursor: nextCursor });
-      setCards((prev) => [...prev, ...res.cards]);
+      const res = await fetchFeed({ category, cursor: nextCursor });
+      const currentReads = await getReads();
+      const readSet = new Set(currentReads.map((c) => c.id));
+      const fresh = res.cards.filter((c) => !readSet.has(c.id));
+      setCards((prev) => [...prev, ...fresh]);
       setNextCursor(res.nextCursor);
     } catch {
       /* ignore */
     } finally {
       setLoadingMore(false);
     }
-  }, [tab, nextCursor, loadingMore, category, difficulty]);
+  }, [tab, nextCursor, loadingMore, category]);
 
   const onToggleSave = useCallback((card: Card) => {
     toggleBookmark(card).then(setBookmarks);
     recordEvent(card.id, 'bookmark');
   }, []);
 
+  const onShare = useCallback((card: Card) => {
+    recordEvent(card.id, 'share');
+    const url = card.sourceUrl;
+    if (Platform.OS === 'web') {
+      // Prefer the native Web Share sheet; fall back to copying the link.
+      const nav = globalThis.navigator as
+        | { share?: (d: { title?: string; url?: string }) => Promise<void>; clipboard?: { writeText: (s: string) => Promise<void> } }
+        | undefined;
+      if (nav?.share) nav.share({ title: card.title, url }).catch(() => {});
+      else if (nav?.clipboard) nav.clipboard.writeText(url).catch(() => {});
+      return;
+    }
+    Share.share({ title: card.title, message: `${card.title} — ${url}`, url }).catch(() => {});
+  }, []);
+
   const onOpen = useCallback((card: Card) => {
     recordEvent(card.id, 'read_more');
+    // Opening an article marks it read → it leaves the feed and moves to Read.
+    markRead(card).then(setReads);
     WebBrowser.openBrowserAsync(card.sourceUrl).catch(() => {});
   }, []);
 
-  const onFeedLayout = (e: LayoutChangeEvent) => setFeedHeight(e.nativeEvent.layout.height);
-
-  const data = tab === 'feed' ? cards : bookmarks;
+  const onFeedLayout = (e: LayoutChangeEvent) => {
+    const h = e.nativeEvent.layout.height;
+    feedHeightRef.current = h;
+    setFeedHeight(h);
+  };
 
   return (
     <View style={[styles.root, { paddingTop: insets.top }]}>
       <View style={styles.header}>
         <View style={styles.brandRow}>
-          <Text style={styles.brand}>AIShorts</Text>
-          <Text style={styles.tagline}>Today in AI, in 60 words</Text>
+          <View style={styles.brandBlock}>
+            <Text style={styles.brand}>AIShorts</Text>
+            <Text style={styles.tagline}>All about AI news</Text>
+          </View>
+          <View style={styles.avatarWrap}>
+            <Pressable onPress={() => setMenuOpen((o) => !o)} hitSlop={8}>
+              <Avatar user={user} />
+            </Pressable>
+            {menuOpen ? (
+              <ProfileMenu
+                user={user}
+                savedCount={bookmarks.length}
+                readCount={reads.length}
+                onClose={() => setMenuOpen(false)}
+                onNavigate={(t) => {
+                  setTab(t);
+                  setMenuOpen(false);
+                }}
+                onAuth={(m) => {
+                  setAuthMode(m);
+                  setMenuOpen(false);
+                }}
+                onLogout={() => {
+                  logout();
+                  setMenuOpen(false);
+                }}
+              />
+            ) : null}
+          </View>
         </View>
-        <View style={styles.tabs}>
-          <Chip label="Feed" active={tab === 'feed'} onPress={() => setTab('feed')} />
-          <Chip
-            label={`Saved${bookmarks.length ? ` (${bookmarks.length})` : ''}`}
-            active={tab === 'saved'}
-            onPress={() => setTab('saved')}
-          />
-        </View>
-        {tab === 'feed' && (
-          <>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
+        {tab === 'feed' ? (
+          <View style={styles.filterRow}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.chipRow}
+              contentContainerStyle={styles.chipRowContent}
+            >
               <Chip label="All" active={!category} onPress={() => setCategory(undefined)} />
               {CATEGORIES.map((c) => (
                 <Chip
@@ -197,57 +632,105 @@ function Feed() {
                 />
               ))}
             </ScrollView>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipRow}>
-              <Chip label="All levels" active={!difficulty} onPress={() => setDifficulty(undefined)} />
-              {DIFFICULTIES.map((d) => (
-                <Chip
-                  key={d}
-                  label={d}
-                  active={difficulty === d}
-                  onPress={() => setDifficulty(difficulty === d ? undefined : d)}
-                />
-              ))}
-            </ScrollView>
-          </>
+          </View>
+        ) : (
+          <View style={styles.subHeader}>
+            <Pressable style={styles.backBtn} onPress={() => setTab('feed')} hitSlop={8}>
+              <Text style={styles.backBtnText}>← Feed</Text>
+            </Pressable>
+            <Text style={styles.subHeaderTitle}>{tab === 'saved' ? 'Saved' : 'History'}</Text>
+          </View>
         )}
       </View>
 
       <View style={styles.feedArea} onLayout={onFeedLayout}>
-        {loading && tab === 'feed' ? (
-          <View style={styles.center}>
-            <ActivityIndicator />
-          </View>
-        ) : data.length === 0 ? (
-          <View style={styles.center}>
-            <Text style={styles.empty}>
-              {tab === 'saved'
-                ? 'No saved shorts yet. Tap ☆ Save on a card.'
-                : 'No cards. Pull to refresh.'}
-            </Text>
-          </View>
-        ) : feedHeight > 0 ? (
-          <FlatList
-            data={data}
-            keyExtractor={(c) => c.id}
-            pagingEnabled
-            showsVerticalScrollIndicator={false}
-            snapToInterval={feedHeight}
-            decelerationRate="fast"
-            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-            onEndReachedThreshold={0.5}
-            onEndReached={loadMore}
-            renderItem={({ item }) => (
-              <CardView
-                card={item}
-                height={feedHeight}
-                saved={savedIds.has(item.id)}
-                onToggleSave={onToggleSave}
-                onOpen={onOpen}
-              />
-            )}
-          />
+        {feedHeight > 0 ? (
+          <>
+            {/* Feed layer stays mounted (just hidden) when other tabs are active,
+                so its scroll position is preserved when you come back. */}
+            <View
+              style={[styles.tabLayer, tab !== 'feed' && styles.hidden]}
+              pointerEvents={tab === 'feed' ? 'auto' : 'none'}
+            >
+              {loading ? (
+                <View style={styles.center}>
+                  <ActivityIndicator />
+                </View>
+              ) : cards.length === 0 ? (
+                <View style={styles.center}>
+                  <Text style={styles.empty}>No cards. Pull to refresh.</Text>
+                </View>
+              ) : (
+                <CardList
+                  data={cards}
+                  feedHeight={feedHeight}
+                  savedIds={savedIds}
+                  refreshing={refreshing}
+                  onRefresh={onRefresh}
+                  onToggleSave={onToggleSave}
+                  onShare={onShare}
+                  onOpen={onOpen}
+                  onEndReached={loadMore}
+                  onScroll={onFeedScroll}
+                />
+              )}
+            </View>
+
+            {tab === 'saved' ? (
+              <View style={styles.tabLayer}>
+                {bookmarks.length === 0 ? (
+                  <View style={styles.center}>
+                    <Text style={styles.empty}>No saved shorts yet. Tap ☆ Save on a card.</Text>
+                  </View>
+                ) : (
+                  <CardList
+                    data={bookmarks}
+                    feedHeight={feedHeight}
+                    savedIds={savedIds}
+                    refreshing={refreshing}
+                    onRefresh={onRefresh}
+                    onToggleSave={onToggleSave}
+                    onShare={onShare}
+                    onOpen={onOpen}
+                  />
+                )}
+              </View>
+            ) : null}
+
+            {tab === 'read' ? (
+              <View style={styles.tabLayer}>
+                {reads.length === 0 ? (
+                  <View style={styles.center}>
+                    <Text style={styles.empty}>
+                      Nothing here yet. Scroll through the feed or open a card and it lands in
+                      your history.
+                    </Text>
+                  </View>
+                ) : (
+                  <CardList
+                    data={reads}
+                    feedHeight={feedHeight}
+                    savedIds={savedIds}
+                    refreshing={refreshing}
+                    onRefresh={onRefresh}
+                    onToggleSave={onToggleSave}
+                    onShare={onShare}
+                    onOpen={onOpen}
+                  />
+                )}
+              </View>
+            ) : null}
+          </>
         ) : null}
       </View>
+
+      {authMode ? (
+        <AuthModal
+          mode={authMode}
+          onClose={() => setAuthMode(null)}
+          onSwitchMode={setAuthMode}
+        />
+      ) : null}
     </View>
   );
 }
@@ -256,7 +739,9 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <StatusBar style="dark" />
-      <Feed />
+      <AuthProvider>
+        <Feed />
+      </AuthProvider>
     </SafeAreaProvider>
   );
 }
@@ -269,12 +754,69 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderBottomWidth: 1,
     borderBottomColor: '#e6e8ec',
+    zIndex: 30, // keep the Levels dropdown above the feed list
   },
-  brandRow: { flexDirection: 'row', alignItems: 'baseline', gap: 8, paddingTop: 6 },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 6,
+  },
+  brandBlock: { flexDirection: 'row', alignItems: 'baseline', gap: 8, flex: 1 },
   brand: { fontSize: 22, fontWeight: '700', color: '#14161a', letterSpacing: -0.5 },
   tagline: { fontSize: 12, color: '#6b7280' },
-  tabs: { flexDirection: 'row', gap: 8, marginTop: 10 },
-  chipRow: { marginTop: 8 },
+  // Avatar + profile menu
+  avatarWrap: { position: 'relative', zIndex: 50 },
+  avatarImg: { backgroundColor: '#e9edf2' },
+  avatarCircle: { alignItems: 'center', justifyContent: 'center', backgroundColor: '#2563eb' },
+  avatarGuest: { backgroundColor: '#eceef2', borderWidth: 1, borderColor: '#dfe3e8' },
+  avatarInitial: { color: '#ffffff', fontWeight: '700' },
+  menuBackdrop: {
+    position: 'absolute',
+    top: -1000,
+    left: -1000,
+    right: -1000,
+    bottom: -1000,
+    zIndex: 49,
+  },
+  menu: {
+    position: 'absolute',
+    top: 44,
+    right: 0,
+    minWidth: 220,
+    backgroundColor: '#ffffff',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#e6e8ec',
+    paddingVertical: 6,
+    zIndex: 51,
+    shadowColor: '#000',
+    shadowOpacity: 0.14,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 10,
+  },
+  menuHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingVertical: 10 },
+  menuHeaderText: { flex: 1, paddingHorizontal: 14, paddingVertical: 8 },
+  menuName: { fontSize: 15, fontWeight: '700', color: '#14161a' },
+  menuEmail: { fontSize: 12, color: '#6b7280', marginTop: 2 },
+  menuDivider: { height: 1, backgroundColor: '#eef0f3', marginVertical: 4 },
+  menuItem: { paddingHorizontal: 14, paddingVertical: 11 },
+  menuItemText: { fontSize: 15, color: '#23262b', fontWeight: '600' },
+  menuItemDanger: { color: '#b91c1c' },
+  // Sub-header for Saved / History views
+  subHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 12 },
+  backBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+    backgroundColor: '#eceef2',
+  },
+  backBtnText: { fontSize: 13, color: '#374151', fontWeight: '600' },
+  subHeaderTitle: { fontSize: 16, fontWeight: '700', color: '#14161a' },
+  filterRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, zIndex: 30 },
+  chipRow: { flex: 1 },
+  chipRowContent: { alignItems: 'center' },
   chip: {
     paddingVertical: 6,
     paddingHorizontal: 12,
@@ -285,13 +827,33 @@ const styles = StyleSheet.create({
   chipOn: { backgroundColor: '#2563eb' },
   chipText: { fontSize: 13, color: '#374151', textTransform: 'capitalize' },
   chipTextOn: { color: '#ffffff' },
-  feedArea: { flex: 1 },
+  feedArea: { flex: 1, position: 'relative' },
+  tabLayer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+  hidden: { display: 'none' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
   empty: { color: '#6b7280', textAlign: 'center', fontSize: 15 },
   card: { paddingHorizontal: 16, paddingTop: 14 },
   image: { width: '100%', height: 180, borderRadius: 14, backgroundColor: '#e9edf2', marginBottom: 14 },
   cardBody: { flex: 1, paddingBottom: 18 },
-  badges: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  badges: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  badgeGroup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  cardActions: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  iconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#f1f3f5',
+    borderWidth: 1,
+    borderColor: '#e6e8ec',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconBtnOn: { backgroundColor: '#eff4ff', borderColor: '#bfd3ff' },
   badge: { paddingVertical: 3, paddingHorizontal: 8, borderRadius: 6 },
   badgeText: { fontSize: 11, fontWeight: '600', textTransform: 'capitalize' },
   title: {
@@ -305,18 +867,131 @@ const styles = StyleSheet.create({
   summaryScroll: { flex: 1 },
   summary: { fontSize: 18, lineHeight: 28, color: '#23262b' },
   why: { fontSize: 14, color: '#6b7280', marginTop: 14, fontStyle: 'italic' },
-  foot: {
+  // Source label + source name + article date — one baseline, cohesive type.
+  credit: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 16 },
+  creditLabel: { fontSize: 12, lineHeight: 16, color: '#9aa3b2', fontWeight: '500' },
+  creditSource: { fontSize: 12, lineHeight: 16, fontWeight: '600', color: '#6b7280', flexShrink: 1 },
+  creditDot: { fontSize: 12, lineHeight: 16, color: '#c2c8d0' },
+  creditDate: { fontSize: 12, lineHeight: 16, color: '#9aa3b2', fontWeight: '500' },
+  // Full-width "read full article" call to action
+  readCta: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    borderTopWidth: 1,
-    borderTopColor: '#e6e8ec',
-    paddingTop: 12,
-    marginTop: 10,
+    backgroundColor: '#2563eb',
+    borderRadius: 16,
+    paddingVertical: 15,
+    paddingHorizontal: 18,
+    marginTop: 14,
+    shadowColor: '#2563eb',
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 5,
   },
-  src: { fontSize: 12, color: '#8a91a0', flex: 1, marginRight: 10 },
-  footActions: { flexDirection: 'row', alignItems: 'center', gap: 16 },
-  save: { fontSize: 14, color: '#6b7280', fontWeight: '600' },
-  saveOn: { color: '#2563eb' },
-  read: { fontSize: 14, color: '#2563eb', fontWeight: '700' },
+  readCtaText: { flex: 1, marginRight: 12 },
+  readCtaKicker: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: 'rgba(255,255,255,0.72)',
+    letterSpacing: 1.4,
+    marginBottom: 3,
+  },
+  readCtaTitle: { fontSize: 16, fontWeight: '700', color: '#ffffff', letterSpacing: -0.2 },
+  readCtaArrowWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  readCtaArrow: { fontSize: 18, color: '#ffffff', fontWeight: '700' },
+  // Auth modal
+  modalOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+    zIndex: 100,
+  },
+  modalBackdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(15,18,25,0.45)',
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 400,
+    backgroundColor: '#ffffff',
+    borderRadius: 18,
+    padding: 24,
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 16,
+  },
+  modalClose: { position: 'absolute', top: 14, right: 16, padding: 4, zIndex: 2 },
+  modalCloseText: { fontSize: 18, color: '#9aa3b2', fontWeight: '600' },
+  modalTitle: { fontSize: 22, fontWeight: '700', color: '#14161a', letterSpacing: -0.3 },
+  modalSub: { fontSize: 14, color: '#6b7280', marginTop: 6, marginBottom: 18 },
+  googleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 12,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#dfe3e8',
+    backgroundColor: '#ffffff',
+  },
+  googleG: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderColor: '#e6e8ec',
+  },
+  googleGText: { fontSize: 13, fontWeight: '800', color: '#4285F4' },
+  googleBtnText: { fontSize: 15, fontWeight: '600', color: '#374151' },
+  orRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginVertical: 16 },
+  orLine: { flex: 1, height: 1, backgroundColor: '#e6e8ec' },
+  orText: { fontSize: 12, color: '#9aa3b2' },
+  input: {
+    borderWidth: 1,
+    borderColor: '#dfe3e8',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: '#14161a',
+    marginBottom: 10,
+    backgroundColor: '#fbfcfd',
+  },
+  modalError: { color: '#b91c1c', fontSize: 13, marginBottom: 8, marginTop: 2 },
+  primaryBtn: {
+    backgroundColor: '#2563eb',
+    borderRadius: 10,
+    paddingVertical: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 4,
+    minHeight: 46,
+  },
+  primaryBtnDisabled: { opacity: 0.6 },
+  primaryBtnText: { color: '#ffffff', fontSize: 15, fontWeight: '700' },
+  switchRow: { alignItems: 'center', marginTop: 16 },
+  switchText: { fontSize: 14, color: '#2563eb', fontWeight: '600' },
 });
