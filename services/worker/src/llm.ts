@@ -10,7 +10,9 @@ export function activeProvider(): LlmProvider {
 
 export function activeModel(): string {
   if (activeProvider() === 'anthropic') return process.env.CLAUDE_MODEL_BULK || 'claude-haiku-4-5';
-  return process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+  // groq decommissioned the llama-3.x chat models; gpt-oss-120b is the current
+  // high-quality general model on the free tier. Override with GROQ_MODEL in .env.
+  return process.env.GROQ_MODEL || 'openai/gpt-oss-120b';
 }
 
 // Is a real LLM usable right now? True only when the active provider has its key.
@@ -50,9 +52,13 @@ async function groq(system: string, user: string): Promise<string> {
             { role: 'system', content: system },
             { role: 'user', content: user },
           ],
-          response_format: { type: 'json_object' },
+          // No response_format:json_object here on purpose. Groq's strict JSON-mode
+          // validator rejects the gpt-oss reasoning channel (json_validate_failed),
+          // so we ask for JSON in the prompt and parse defensively via extractJson().
+          // reasoning_effort:'low' keeps a summarization call fast and token-cheap.
           temperature: 0.4,
-          max_tokens: 700,
+          max_tokens: 1000,
+          reasoning_effort: 'low',
         }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });

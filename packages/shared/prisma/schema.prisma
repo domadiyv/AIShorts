@@ -14,12 +14,6 @@ enum CardStatus {
   rejected
 }
 
-enum Difficulty {
-  beginner
-  intermediate
-  advanced
-}
-
 enum CardType {
   news
   lesson
@@ -39,10 +33,71 @@ model Source {
   url       String     @unique
   trusted   Boolean    @default(false)
   active    Boolean    @default(true)
+  // Source importance on the feed: 1 = top … 5 = low. Feeds into each card's
+  // blended rankScore. Editable from the admin panel (Sources list).
+  priority  Int        @default(3)
   createdAt DateTime   @default(now())
+  // High-water mark: the newest item publish date this source has ingested so
+  // far. Each run skips items at/before this date (feeds are newest-first), so we
+  // only process genuinely-new articles instead of re-filtering the whole feed
+  // every time. Null until the first successful ingest of a dated item.
+  lastItemAt DateTime?
   rawItems  RawItem[]
 
+  @@index([priority])
   @@map("sources")
+}
+
+// Feed category. Moved out of a hardcoded constant into the DB so operators can
+// add new categories from the admin panel and have them appear everywhere
+// (card dropdown, feed tabs) without a code change or redeploy.
+model Category {
+  id        String   @id @default(cuid())
+  name      String   @unique // display name, e.g. "How-to"
+  slug      String   @unique // url/keyword-safe, e.g. "how-to"
+  sortOrder Int      @default(100)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([active, sortOrder])
+  @@map("categories")
+}
+
+// Self-hosted image bytes stored IN Postgres (no external hotlink, no disk
+// dependency). Two kinds:
+//   - "source": an image fetched from the article/RSS feed for one card.
+//   - "sample": a reusable library image, chosen on the fly by category when a
+//     card has no source image (many cards can share one sample asset).
+// Served by the API at /v1/images/:id.
+model MediaAsset {
+  id          String   @id @default(cuid())
+  data        Bytes // raw image bytes (Postgres bytea)
+  contentType String   @default("image/jpeg")
+  kind        String   @default("source") // 'source' | 'sample'
+  category    String? // for sample images: which category they suit
+  variant     String? // for sample images: distinguishes the several per category
+  byteSize    Int      @default(0)
+  sha256      String   @unique // content hash → dedups identical images
+  sourceUrl   String? // where a source image was fetched from
+  createdAt   DateTime @default(now())
+  cards       Card[]
+
+  @@index([kind, category])
+  @@map("media_assets")
+}
+
+// Admin panel operator. Replaces the single hardcoded ADMIN_PASSWORD: operators
+// are rows here (bcrypt password hash), created via the create-admin script.
+model AdminUser {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("admin_users")
 }
 
 // A raw fetched article before summarization.
@@ -76,14 +131,26 @@ model Card {
   summary      String
   whyItMatters String?
   category     String
-  difficulty   Difficulty  @default(beginner)
   tags         String[]
+  // Legacy/relative image URL (e.g. bundled "/media/seed/*.png"). New cards store
+  // their image bytes in MediaAsset and reference it via imageAssetId; the API
+  // prefers the asset when both are set.
   imageUrl     String?
+  imageAsset   MediaAsset? @relation(fields: [imageAssetId], references: [id])
+  imageAssetId String?
   sourceName   String
   sourceUrl    String
   status       CardStatus  @default(pending)
   rawItem      RawItem?    @relation(fields: [rawItemId], references: [id])
   rawItemId    String?     @unique
+  // Story importance: 1 = top … 5 = low. Judged by the summarizer, admin-editable.
+  importance   Int         @default(3)
+  // The article's OWN published date (denormalized from RawItem.publishedAt so the
+  // feed can sort/display without joining). Falls back to null when unknown.
+  articlePublishedAt DateTime?
+  // Blended feed ranking score (higher = shown first). See computeRankScore in
+  // @aishorts/shared: blends importance, source priority, and article recency.
+  rankScore    Float       @default(0)
   publishedAt  DateTime?
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
@@ -91,9 +158,39 @@ model Card {
   events       CardEvent[]
 
   @@index([status, publishedAt])
+  @@index([status, rankScore])
   @@index([category])
-  @@index([difficulty])
   @@map("cards")
+}
+
+// A card retired by the purge job (article older than the retention window). We
+// keep the text record here for reference/analytics but DELIBERATELY drop the
+// image bytes (the MediaAsset) — images dominate storage. `imageUrl` preserves
+// the ORIGINAL image URL so the picture can be re-fetched manually later if
+// wanted. Nothing in the app reads this table; it's a cold archive.
+model ArchivedCard {
+  id                 String     @id @default(cuid())
+  originalCardId     String     @unique // the purged Card.id, for traceability
+  type               CardType   @default(news)
+  title              String
+  summary            String
+  whyItMatters       String?
+  category           String
+  tags               String[]
+  // Best available ORIGINAL image URL (source-image fetch URL, else the card's
+  // stored/relative URL). NOT the bytes — those are deleted to reclaim space.
+  imageUrl           String?
+  sourceName         String
+  sourceUrl          String
+  status             CardStatus @default(published)
+  importance         Int        @default(3)
+  articlePublishedAt DateTime?
+  publishedAt        DateTime?
+  createdAt          DateTime // preserved from the original card
+  archivedAt         DateTime   @default(now())
+
+  @@index([articlePublishedAt])
+  @@map("archived_cards")
 }
 
 model User {

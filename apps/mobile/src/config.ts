@@ -16,6 +16,17 @@ function normalize(url: string): string {
   return url.trim().replace(/\/+$/, '');
 }
 
+// In release builds only HTTPS is permitted — cleartext HTTP is disabled at the
+// native layer (Android network-security-config + iOS ATS) for store compliance,
+// so an http:// API base simply wouldn't connect. In dev we allow http so the
+// emulator/simulator can reach a local server. Empty string = clear override.
+export function isAllowedApiUrl(url: string): boolean {
+  const u = normalize(url);
+  if (!u) return true;
+  if (__DEV__) return /^https?:\/\//i.test(u);
+  return /^https:\/\//i.test(u);
+}
+
 /** Current API base (honors the runtime override). Use this for all requests. */
 export function getApiBase(): string {
   return currentApiUrl;
@@ -25,16 +36,25 @@ export function getApiBase(): string {
 export async function loadApiBase(): Promise<string> {
   try {
     const saved = await AsyncStorage.getItem(API_URL_KEY);
-    if (saved && saved.trim()) currentApiUrl = normalize(saved);
+    // Ignore a stale http:// override in a release build — it can't connect and
+    // would silently break the app.
+    if (saved && saved.trim() && isAllowedApiUrl(saved)) currentApiUrl = normalize(saved);
   } catch {
     // ignore — fall back to the compile-time default
   }
   return currentApiUrl;
 }
 
-/** Persist a new API base (empty string clears the override → back to default). */
+/**
+ * Persist a new API base (empty string clears the override → back to default).
+ * Rejects a non-HTTPS URL in release builds (throws) so the user gets a clear
+ * error instead of a silently-dead connection.
+ */
 export async function setApiBase(url: string): Promise<string> {
   const next = normalize(url);
+  if (!isAllowedApiUrl(next)) {
+    throw new Error('Enter an https:// URL — plain http is not allowed.');
+  }
   currentApiUrl = next || DEFAULT_API_URL;
   try {
     if (next) await AsyncStorage.setItem(API_URL_KEY, next);
@@ -45,5 +65,7 @@ export async function setApiBase(url: string): Promise<string> {
   return currentApiUrl;
 }
 
+// Fallback category chips. The live list is fetched from GET /v1/categories at
+// startup (so admin-added categories show up); this covers the offline/first-load
+// case and keeps the type stable.
 export const CATEGORIES = ['Models', 'Tools', 'Research', 'Business', 'Policy', 'How-to'] as const;
-export const DIFFICULTIES = ['beginner', 'intermediate', 'advanced'] as const;

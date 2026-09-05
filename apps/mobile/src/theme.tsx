@@ -15,7 +15,7 @@ export type Palette = {
   bg: string; // app / feed background
   surface: string; // cards, header, menus, modals
   surfaceAlt: string; // chips, back button, dividers-on-surface
-  surfaceMuted: string; // icon buttons, difficulty badge
+  surfaceMuted: string; // icon buttons, muted chips
   inputBg: string;
   border: string;
   borderMuted: string;
@@ -30,7 +30,6 @@ export type Palette = {
   danger: string;
   catBg: string; // category badge background
   catText: string; // category badge text
-  diffBg: string; // difficulty badge background
   icon: string; // default icon color
   overlay: string; // modal backdrop
   scrollIndicator: 'black' | 'white';
@@ -56,7 +55,6 @@ const light: Palette = {
   danger: '#b91c1c',
   catBg: '#eef2ff',
   catText: '#4338ca',
-  diffBg: '#f1f3f5',
   icon: '#6b7280',
   overlay: 'rgba(15,18,25,0.45)',
   scrollIndicator: 'black',
@@ -82,17 +80,9 @@ const dark: Palette = {
   danger: '#f87171',
   catBg: '#20284a',
   catText: '#a5b4fc',
-  diffBg: '#242832',
   icon: '#9aa3b2',
   overlay: 'rgba(0,0,0,0.62)',
   scrollIndicator: 'white',
-};
-
-// Per-scheme difficulty text colors: the light-mode tones are too dark to read on
-// a dark card, so dark mode gets lighter variants.
-export const DIFF_COLORS: Record<Scheme, Record<string, string>> = {
-  light: { beginner: '#15803d', intermediate: '#b45309', advanced: '#b91c1c' },
-  dark: { beginner: '#4ade80', intermediate: '#fbbf24', advanced: '#f87171' },
 };
 
 const KEY = 'aishorts.theme.v1';

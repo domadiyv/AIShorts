@@ -58,12 +58,15 @@ export function startRefresh(): { started: boolean; state: RefreshState } {
         status: 'done',
         message:
           result.created > 0
-            ? `Added ${result.created} new card(s) to review.`
+            ? `Added ${result.created} new card(s) to review.` +
+              (result.filtered > 0 ? ` (${result.filtered} non-AI item(s) filtered out.)` : '')
             : result.skipped > 0
               ? `Fetched articles, but couldn't summarize any (${result.skipped} failed — check the LLM key and API logs).`
-              : result.inserted > 0
-                ? `Fetched ${result.inserted} new article(s), but none were recent enough to summarize.`
-                : 'No new articles found.',
+              : result.filtered > 0
+                ? `No new cards — ${result.filtered} item(s) were filtered out as not AI-related.`
+                : result.inserted > 0
+                  ? `Fetched ${result.inserted} new article(s), but none were recent enough to summarize.`
+                  : 'No new articles found.',
         finishedAt: new Date().toISOString(),
         result,
       };
@@ -79,4 +82,27 @@ export function startRefresh(): { started: boolean; state: RefreshState } {
   })();
 
   return { started: true, state };
+}
+
+// Auto-fetch on a fixed cadence so fresh cards keep arriving without anyone
+// clicking "Fetch". It runs through the same startRefresh() state machine as the
+// manual button, so the in-memory job state is *shared*: if an hourly fetch is
+// mid-flight when an admin clicks Fetch, startRefresh() returns started=false,
+// the POST handler replies 409 with the running state, and the panel simply
+// shows/polls the bg job's progress — no second run, no error. The reverse holds
+// too: a manual run in flight turns the next hourly tick into a no-op.
+const HOURLY_MS = 60 * 60 * 1000;
+let hourlyTimer: ReturnType<typeof setInterval> | null = null;
+
+export function startHourlyRefresh(log: (msg: string) => void = () => {}): void {
+  if (hourlyTimer) return; // idempotent — safe if called more than once
+  hourlyTimer = setInterval(() => {
+    const { started } = startRefresh();
+    log(
+      started
+        ? '[auto-refresh] hourly fetch started'
+        : '[auto-refresh] hourly tick skipped — a fetch is already running',
+    );
+  }, HOURLY_MS);
+  log(`[auto-refresh] scheduled: every ${HOURLY_MS / 60000} min`);
 }

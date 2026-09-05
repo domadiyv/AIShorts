@@ -1,27 +1,41 @@
 'use server';
-import { timingSafeEqual } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { SESSION_COOKIE, SESSION_TTL_MS, adminPassword, createSessionToken } from '../../lib/auth';
+import { SESSION_COOKIE, SESSION_TTL_MS, sessionSecret, createSessionToken } from '../../lib/auth';
 
-// Constant-time compare so a wrong password can't be discovered byte-by-byte.
-function passwordMatches(candidate: string, actual: string): boolean {
-  const a = Buffer.from(candidate);
-  const b = Buffer.from(actual);
-  return a.length === b.length && timingSafeEqual(a, b);
-}
+const API = process.env.API_URL || 'http://localhost:4000';
+const TOKEN = process.env.ADMIN_TOKEN || '';
 
 // Only allow same-site relative paths — never an attacker-supplied absolute URL.
 function safeNext(raw: string): string {
   return raw.startsWith('/') && !raw.startsWith('//') ? raw : '/';
 }
 
+// Verify credentials against the admin_users table (via the API, which holds the
+// bcrypt hashes). The Next server never sees any password hash — it forwards the
+// email/password over the service token and trusts the API's yes/no.
+async function verifyCredentials(email: string, password: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${API}/v1/admin/auth/login`, {
+      method: 'POST',
+      headers: { 'x-admin-token': TOKEN, 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+      cache: 'no-store',
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function login(formData: FormData) {
-  const secret = adminPassword();
+  const secret = sessionSecret();
   const next = safeNext(String(formData.get('next') ?? '/'));
+  const email = String(formData.get('email') ?? '').trim();
+  const password = String(formData.get('password') ?? '');
 
   if (!secret) redirect('/login?error=unconfigured');
-  if (!passwordMatches(String(formData.get('password') ?? ''), secret)) {
+  if (!email || !password || !(await verifyCredentials(email, password))) {
     redirect(`/login?error=1&next=${encodeURIComponent(next)}`);
   }
 

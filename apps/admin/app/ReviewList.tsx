@@ -2,24 +2,33 @@
 
 import { useMemo, useState, useTransition } from 'react';
 import { CardItem } from './CardItem';
+import type { SaveResult } from './actions';
 
 type Card = {
   id: string;
   title: string;
   summary: string;
-  whyItMatters?: string | null;
   category: string;
-  difficulty: string;
   tags: string[];
+  imageUrl?: string | null;
   sourceName: string;
   sourceUrl: string;
   status: string;
+  importance?: number | null;
   articlePublishedAt?: string | null;
   sourcedAt?: string | null;
 };
 
 type Action = (fd: FormData) => Promise<void>;
 type BulkAction = (ids: string[]) => Promise<number>;
+type SaveAction = (input: {
+  id: string;
+  title: string;
+  summary: string;
+  category: string;
+  tags: string[];
+  importance: number;
+}) => Promise<SaveResult>;
 
 // Wraps the card list with a selection toolbar. Per-card edit/approve/reject
 // still work through CardItem's own <form>; this adds "select many → one action".
@@ -28,7 +37,6 @@ export function ReviewList({
   cards,
   status,
   categories,
-  difficulties,
   approveCard,
   rejectCard,
   saveCard,
@@ -38,10 +46,9 @@ export function ReviewList({
   cards: Card[];
   status: string;
   categories: readonly string[];
-  difficulties: readonly string[];
   approveCard: Action;
   rejectCard: Action;
-  saveCard: Action;
+  saveCard: SaveAction;
   approveCards: BulkAction;
   rejectCards: BulkAction;
 }) {
@@ -159,7 +166,6 @@ export function ReviewList({
           key={c.id}
           card={c}
           categories={categories}
-          difficulties={difficulties}
           approveCard={approveCard}
           rejectCard={rejectCard}
           saveCard={saveCard}

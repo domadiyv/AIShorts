@@ -1,13 +1,13 @@
 import { NextResponse, type NextRequest } from 'next/server';
-import { SESSION_COOKIE, adminPassword, verifySessionToken } from './lib/auth';
+import { SESSION_COOKIE, sessionSecret, verifySessionToken } from './lib/auth';
 
 // Gate the whole admin panel behind a session cookie.
 //
-// Fails CLOSED: if ADMIN_PASSWORD isn't configured, nobody gets in (the login
+// Fails CLOSED: if ADMIN_TOKEN isn't configured, nobody gets in (the login
 // page explains how to set it). That's deliberate — this panel can approve and
-// edit published content, so "no password configured" must never mean "open".
+// edit published content, so "no secret configured" must never mean "open".
 export async function middleware(req: NextRequest) {
-  const secret = adminPassword();
+  const secret = sessionSecret();
   const token = req.cookies.get(SESSION_COOKIE)?.value;
 
   if (secret && (await verifySessionToken(secret, token))) {

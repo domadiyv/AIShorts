@@ -1,6 +1,7 @@
 // Fetch the real article body so the summarizer has material for a full
-// ~60-word card. RSS feeds only carry a short teaser. We extract readable
-// text to summarize + link back — we never republish the full article.
+// ~60-word card, and surface the article's lead image (og:image) so we can
+// self-host it. RSS feeds only carry a short teaser. We extract readable text to
+// summarize + link back — we never republish the full article.
 const ARTICLE_FETCH_TIMEOUT_MS = 15000;
 
 const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
@@ -11,13 +12,16 @@ const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
     ),
   ]);
 
-export async function getArticleText(url: string, fallback: string): Promise<string> {
+export type ExtractedArticle = { text: string; imageUrl: string | null };
+
+// Fetch + extract once, returning both the readable text and the lead image.
+// On any failure (paywall, block, timeout, unparseable) the text falls back to
+// the RSS teaser and the image is null.
+export async function extractArticle(url: string, fallback: string): Promise<ExtractedArticle> {
   try {
     // ESM-only package — load via dynamic import under our CommonJS build.
     const mod: any = await import('@extractus/article-extractor');
     const extract = mod.extract ?? mod.default?.extract ?? mod.default;
-    // Bound the fetch: a hung page must not freeze the whole pipeline. On
-    // timeout we fall through to the RSS teaser like any other extract failure.
     const article: any = await withTimeout(extract(url), ARTICLE_FETCH_TIMEOUT_MS, 'article fetch');
     const html: string = article?.content ?? '';
     const text = html
@@ -25,9 +29,17 @@ export async function getArticleText(url: string, fallback: string): Promise<str
       .replace(/&[a-z]+;/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    if (text.length > 250) return text;
+    const imageUrl: string | null =
+      typeof article?.image === 'string' && /^https?:\/\//i.test(article.image)
+        ? article.image
+        : null;
+    return { text: text.length > 250 ? text : fallback, imageUrl };
   } catch {
-    // Paywall, block, timeout, or unparseable — fall back to the RSS teaser.
+    return { text: fallback, imageUrl: null };
   }
-  return fallback;
+}
+
+// Back-compat convenience: just the text.
+export async function getArticleText(url: string, fallback: string): Promise<string> {
+  return (await extractArticle(url, fallback)).text;
 }

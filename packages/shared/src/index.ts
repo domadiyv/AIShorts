@@ -1,6 +1,7 @@
 export * from './constants';
 export * from './schemas';
 export * from './media';
+export * from './mediaAssets';
 
 // Re-export Prisma types and a shared singleton client so every service
 // uses one connection pool (important for Neon's connection limits).

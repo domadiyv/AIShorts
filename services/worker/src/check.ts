@@ -23,7 +23,7 @@ async function main() {
   for (const c of samples) {
     const words = c.summary.trim().split(/\s+/).length;
     console.log('\n----------------------------------------');
-    console.log(`[${c.difficulty} | ${c.category}] ${c.title}`);
+    console.log(`[${c.category}] ${c.title}`);
     console.log(c.summary, `(${words} words)`);
     if (c.whyItMatters) console.log('Why:', c.whyItMatters);
     console.log('Source:', c.sourceName, '—', c.sourceUrl);

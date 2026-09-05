@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Image,
   Linking,
@@ -20,13 +21,14 @@ import {
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { Ionicons } from '@expo/vector-icons';
+import { Image as ExpoImage } from 'expo-image';
 import * as WebBrowser from 'expo-web-browser';
 import { CATEGORIES, getApiBase, setApiBase, loadApiBase, DEFAULT_API_URL } from './src/config';
-import { fetchFeed, recordEvent, resolveMediaUrl } from './src/api';
+import { fetchFeed, fetchCategories, apiSearch, recordEvent, resolveMediaUrl } from './src/api';
 import { getBookmarks, toggleBookmark } from './src/bookmarks';
 import { getReads, markRead, markReadMany } from './src/reads';
 import { AuthProvider, useAuth } from './src/auth';
-import { ThemeProvider, useTheme, DIFF_COLORS, type Palette, type ThemeMode } from './src/theme';
+import { ThemeProvider, useTheme, type Palette, type ThemeMode } from './src/theme';
 import type { AuthUser } from './src/api';
 import type { Card } from './src/types';
 
@@ -41,13 +43,38 @@ function useThemedStyles() {
   return { colors, styles };
 }
 
-// Human-readable article date, e.g. "Jul 26, 2026". Empty string if unknown.
+// Article date. Within the last week we show the exact date (e.g. "Sep 5"), so
+// fresh news reads precisely; older than that we switch to a compact relative
+// label ("1w ago", "3mo ago", "1y ago"). Missing/unparseable → "Recently".
 function formatDate(iso: string | null): string {
-  if (!iso) return '';
+  if (!iso) return 'Recently';
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  if (Number.isNaN(d.getTime())) return 'Recently';
+  const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
+  if (days < 0) return 'Just now';
+  // Up to and including a week old: show the actual date.
+  if (days <= 7) return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  // Older than a week: compact "<n><unit> ago" — weeks, then months, then years.
+  if (days < 30) return `${Math.floor(days / 7)}w ago`;
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+  return `${Math.floor(days / 365)}y ago`;
 }
+
+// Turn a #rrggbb into an rgba() string at the given alpha. Used to build a soft
+// left→right gradient (transparent → surface) with stacked Views, so we get a
+// fade edge without pulling in expo-linear-gradient (which needs a native build).
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// Opacity ramp for the chip-row fade: 0 (fully clear, left) → 1 (solid surface,
+// right), so category chips dissolve into the header as they reach the search
+// button instead of being hard-clipped.
+const FADE_STEPS = [0, 0.15, 0.35, 0.6, 0.82, 1];
 
 // Case-insensitive match across the fields a reader would search by. Empty query
 // matches everything. Order is never touched by callers (they filter in place),
@@ -92,6 +119,27 @@ async function fetchUnreadPage(opts: {
     if (collected.length >= minUnread) break; // enough unread to show
   }
   return { cards: collected, nextCursor };
+}
+
+// How many upcoming cards' images to warm ahead of the one on screen. Image
+// bytes live in Postgres and take a moment to fetch+decode, so pre-warming the
+// next few means they're already in expo-image's memory/disk cache by the time
+// the user swipes to them — no visible load spinner.
+const PREFETCH_AHEAD = 3;
+
+// Prefetch the images for the `PREFETCH_AHEAD` cards after `fromIdx`. `seen`
+// dedups across calls so we don't re-issue prefetches for URLs already warmed
+// this session (it's reset when the feed is refreshed and the cache is cleared).
+function prefetchAhead(list: Card[], fromIdx: number, seen: Set<string>) {
+  const urls: string[] = [];
+  for (let i = fromIdx; i < fromIdx + PREFETCH_AHEAD && i < list.length; i++) {
+    const u = resolveMediaUrl(list[i]?.imageUrl ?? null);
+    if (u && !seen.has(u)) {
+      seen.add(u);
+      urls.push(u);
+    }
+  }
+  if (urls.length) ExpoImage.prefetch(urls).catch(() => {});
 }
 
 function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
@@ -214,18 +262,22 @@ function CardView({
   return (
     <View style={[styles.card, { height }]}>
       {resolveMediaUrl(card.imageUrl) ? (
-        <Image source={{ uri: resolveMediaUrl(card.imageUrl)! }} style={[styles.image, { height: imageHeight }]} />
+        <ExpoImage
+          source={{ uri: resolveMediaUrl(card.imageUrl)! }}
+          style={[styles.image, { height: imageHeight }]}
+          contentFit="cover"
+          // Cache in memory + on disk so a card's image is instant on revisit and
+          // survives app restarts (prefetch below warms upcoming cards).
+          cachePolicy="memory-disk"
+          transition={180}
+          recyclingKey={card.id}
+        />
       ) : null}
       <View style={styles.cardBody}>
         <View style={styles.badges}>
           <View style={styles.badgeGroup}>
             <View style={[styles.badge, { backgroundColor: colors.catBg }]}>
               <Text style={[styles.badgeText, { color: colors.catText }]}>{card.category}</Text>
-            </View>
-            <View style={[styles.badge, { backgroundColor: colors.diffBg }]}>
-              <Text style={[styles.badgeText, { color: DIFF_COLORS[colors.scheme][card.difficulty] ?? colors.textMuted }]}>
-                {card.difficulty}
-              </Text>
             </View>
           </View>
           <View style={styles.cardActions}>
@@ -290,7 +342,7 @@ function CardView({
             </Text>
           </View>
           <View style={styles.readCtaArrowWrap}>
-            <Text style={styles.readCtaArrow}>→</Text>
+            <Ionicons name="arrow-forward" size={20} color="#ffffff" />
           </View>
         </Pressable>
       </View>
@@ -301,18 +353,7 @@ function CardView({
 // A single vertically-paged card list. Extracted so each tab can own its own
 // FlatList instance — that's what lets the Feed keep its scroll position while
 // you visit other tabs (the instance stays mounted, just hidden).
-function CardList({
-  data,
-  feedHeight,
-  savedIds,
-  refreshing,
-  onRefresh,
-  onToggleSave,
-  onShare,
-  onOpen,
-  onEndReached,
-  onScroll,
-}: {
+const CardList = forwardRef<FlatList<Card>, {
   data: Card[];
   feedHeight: number;
   savedIds: Set<string>;
@@ -323,10 +364,22 @@ function CardList({
   onOpen: (c: Card) => void;
   onEndReached?: () => void;
   onScroll?: (e: NativeScrollEvent) => void;
-}) {
+}>(function CardList({
+  data,
+  feedHeight,
+  savedIds,
+  refreshing,
+  onRefresh,
+  onToggleSave,
+  onShare,
+  onOpen,
+  onEndReached,
+  onScroll,
+}, ref) {
   const { colors } = useThemedStyles();
   return (
     <FlatList
+      ref={ref}
       data={data}
       keyExtractor={(c) => c.id}
       pagingEnabled
@@ -357,7 +410,7 @@ function CardList({
       )}
     />
   );
-}
+});
 
 // Round avatar: photo if we have one, else an initial, else a guest glyph.
 function Avatar({ user, size = 36 }: { user: AuthUser | null; size?: number }) {
@@ -404,6 +457,7 @@ function ProfileMenu({
   onNavigate,
   onAuth,
   onLogout,
+  onDeleteAccount,
   onSettings,
 }: {
   user: AuthUser | null;
@@ -412,6 +466,7 @@ function ProfileMenu({
   onNavigate: (tab: Tab) => void;
   onAuth: (mode: 'login' | 'register') => void;
   onLogout: () => void;
+  onDeleteAccount: () => void;
   onSettings: () => void;
 }) {
   const { styles } = useThemedStyles();
@@ -450,7 +505,10 @@ function ProfileMenu({
         <MenuItem label="Settings" onPress={onSettings} />
         <View style={styles.menuDivider} />
         {user ? (
-          <MenuItem label="Log out" danger onPress={onLogout} />
+          <>
+            <MenuItem label="Log out" danger onPress={onLogout} />
+            <MenuItem label="Delete account" danger onPress={onDeleteAccount} />
+          </>
         ) : (
           <>
             <MenuItem label="Log in" onPress={() => onAuth('login')} />
@@ -684,13 +742,20 @@ function SettingsModal({
   const [view, setView] = useState<'main' | 'server' | 'about' | 'terms'>('main');
   const [url, setUrl] = useState(getApiBase());
   const [busy, setBusy] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
 
   const saveServer = async (value: string) => {
     setBusy(true);
+    setServerError(null);
     try {
       await setApiBase(value);
       onSaved();
       setView('main');
+    } catch (e) {
+      // setApiBase rejects a non-HTTPS URL in release builds — surface the reason.
+      setServerError(
+        e instanceof Error && e.message ? e.message : 'Couldn’t save the server URL.',
+      );
     } finally {
       setBusy(false);
     }
@@ -751,6 +816,8 @@ function SettingsModal({
 
             <Text style={styles.settingsHint}>Default: {DEFAULT_API_URL}</Text>
 
+            {serverError ? <Text style={styles.modalError}>{serverError}</Text> : null}
+
             <Pressable
               style={[styles.primaryBtn, busy && styles.primaryBtnDisabled]}
               onPress={() => saveServer(url)}
@@ -786,12 +853,15 @@ function SettingsModal({
 function Feed() {
   const insets = useSafeAreaInsets();
   const { colors, styles } = useThemedStyles();
-  const { user, logout } = useAuth();
+  const { user, logout, deleteAccount } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [authMode, setAuthMode] = useState<'login' | 'register' | null>(null);
   const [tab, setTab] = useState<Tab>('feed');
   const [category, setCategory] = useState<string | undefined>();
+  // Filter chips: the admin-managed list from the API, falling back to the
+  // bundled defaults until it loads (or if the request fails).
+  const [categories, setCategories] = useState<string[]>([...CATEGORIES]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [cards, setCards] = useState<Card[]>([]);
@@ -805,17 +875,89 @@ function Feed() {
 
   const savedIds = useMemo(() => new Set(bookmarks.map((c) => c.id)), [bookmarks]);
 
-  // Live search filters the loaded lists in place, preserving native order
-  // (latest first). Search only runs on the active tab (feed or History), and
-  // the query resets when you switch tabs, so filtering both here is safe.
+  // Feed search hits the server so it finds cards across the whole catalog, not
+  // just the pages already loaded into memory. `null` = no server results yet
+  // (idle or in-flight); we fall back to a local filter of the loaded cards for
+  // an instant result while the request is in flight.
+  const [searchResults, setSearchResults] = useState<Card[] | null>(null);
+
+  // Debounced full-catalog search on the feed tab. Scoped to the active category
+  // chip so results match what the chip would show. History (reads) stays a
+  // local filter below — that data lives only on-device.
+  useEffect(() => {
+    const q = query.trim();
+    if (tab !== 'feed' || q.length < 2) {
+      setSearchResults(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(() => {
+      apiSearch(q, category).then((res) => {
+        if (!cancelled) setSearchResults(res);
+      });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [query, tab, category]);
+
+  // Live search results for the feed. Prefer server results (whole catalog);
+  // until they arrive, show a local filter of the loaded cards so typing feels
+  // instant. No query → the normal paginated feed.
   const feedData = useMemo(
-    () => (query.trim() ? cards.filter((c) => matchesQuery(c, query)) : cards),
-    [cards, query],
+    () =>
+      query.trim()
+        ? (searchResults ?? cards.filter((c) => matchesQuery(c, query)))
+        : cards,
+    [cards, query, searchResults],
   );
   const readData = useMemo(
     () => (query.trim() ? reads.filter((c) => matchesQuery(c, query)) : reads),
     [reads, query],
   );
+
+  // Account deletion is irreversible, so gate it behind a two-step confirm
+  // (Apple 5.1.1(v) / Google Play require an in-app deletion path). The server
+  // hard-deletes the user + their bookmarks, events and devices; on success the
+  // AuthProvider clears the local session and the UI drops back to the guest state.
+  const confirmDeleteAccount = useCallback(() => {
+    setMenuOpen(false);
+    Alert.alert(
+      'Delete account?',
+      'This permanently deletes your account and all your data (saved shorts, history and devices). This can’t be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            Alert.alert(
+              'Are you sure?',
+              'Your account will be permanently deleted immediately.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Delete account',
+                  style: 'destructive',
+                  onPress: () => {
+                    deleteAccount().catch((e) => {
+                      Alert.alert(
+                        'Couldn’t delete account',
+                        e instanceof Error && e.message
+                          ? e.message
+                          : 'Something went wrong. Please try again.',
+                      );
+                    });
+                  },
+                },
+              ],
+            );
+          },
+        },
+      ],
+    );
+  }, [deleteAccount]);
 
   const openSearch = useCallback(() => setSearchOpen(true), []);
   const closeSearch = useCallback(() => {
@@ -834,12 +976,25 @@ function Feed() {
   // until the next refresh — so the list doesn't reshuffle under your finger.
   const feedCardsRef = useRef<Card[]>([]);
   const feedHeightRef = useRef(0);
+  // The feed's FlatList, so a re-tap on the active chip can scroll it to the top.
+  const feedListRef = useRef<FlatList<Card>>(null);
+  // Latest vertical scroll offset, so the chip handler can tell "at top" (scroll)
+  // from "already at top" (refresh) without reading it off a scroll event.
+  const feedOffsetRef = useRef(0);
   // Highest card index reached so far (starts at the first card, index 0).
   const maxSeenRef = useRef(0);
+  // Image URLs already handed to expo-image's prefetcher this session, so we
+  // don't re-warm the same card twice. Cleared alongside the image cache on
+  // refresh (see onRefresh).
+  const prefetchedRef = useRef<Set<string>>(new Set());
   const onFeedScroll = useRef((e: NativeScrollEvent) => {
+    feedOffsetRef.current = e.contentOffset.y;
     const h = feedHeightRef.current;
     if (h <= 0) return;
     const idx = Math.round(e.contentOffset.y / h); // card currently on screen
+    // Warm the next few cards' images as the user moves through the feed, even
+    // when they haven't advanced the high-water mark (e.g. scrolling back down).
+    prefetchAhead(feedCardsRef.current, idx + 1, prefetchedRef.current);
     if (idx <= maxSeenRef.current) return;
     // Cards between the previous high-water mark and the current card have been
     // scrolled past → mark them read.
@@ -861,6 +1016,9 @@ function Feed() {
       setCards(res.cards);
       setNextCursor(res.nextCursor);
       maxSeenRef.current = 0;
+      feedOffsetRef.current = 0;
+      // Warm the images just after the (already-rendering) first card.
+      prefetchAhead(res.cards, 1, prefetchedRef.current);
     } catch {
       setCards([]);
       setNextCursor(null);
@@ -876,6 +1034,10 @@ function Feed() {
   useEffect(() => {
     getBookmarks().then(setBookmarks);
     getReads().then(setReads);
+    // Pull the live (admin-managed) category list; keep defaults on failure.
+    fetchCategories().then((cats) => {
+      if (cats.length) setCategories(cats);
+    });
   }, []);
 
   // Keep the ref the scroll callback reads in sync with the *displayed* feed, so
@@ -903,9 +1065,19 @@ function Feed() {
         const readSet = new Set(currentReads.map((c) => c.id));
         setReads(currentReads);
         const res = await fetchUnreadPage({ category, readIds: readSet });
+        // A refresh replaces the whole feed, so the old cards' images are gone
+        // for good — drop them from expo-image's caches (memory + disk) so they
+        // don't linger, and reset the prefetch dedup set before re-warming.
+        await Promise.all([
+          ExpoImage.clearMemoryCache(),
+          ExpoImage.clearDiskCache(),
+        ]).catch(() => {});
+        prefetchedRef.current = new Set();
         setCards(res.cards);
         setNextCursor(res.nextCursor);
         maxSeenRef.current = 0;
+        feedOffsetRef.current = 0;
+        prefetchAhead(res.cards, 1, prefetchedRef.current);
       }
     } catch {
       /* keep existing */
@@ -913,6 +1085,28 @@ function Feed() {
       setRefreshing(false);
     }
   }, [tab, category]);
+
+  // Category chip tap. First tap on a *different* chip switches category (the feed
+  // reloads from the top). Tapping the chip that's already active scrolls the feed
+  // to the top; tapping it again once already at the top pulls a refresh — the same
+  // "tap the active tab to go up, tap again to refresh" gesture as native tab bars.
+  const onCategoryPress = useCallback(
+    (target: string | undefined) => {
+      const isActive = target === undefined ? !category : category === target;
+      if (!isActive) {
+        setCategory(target);
+        return;
+      }
+      // "At top" = showing the first card (offset within half a card of 0).
+      const atTop = feedOffsetRef.current <= (feedHeightRef.current || 1) / 2;
+      if (atTop) {
+        onRefresh();
+      } else {
+        feedListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      }
+    },
+    [category, onRefresh],
+  );
 
   const loadMore = useCallback(async () => {
     if (tab !== 'feed' || !nextCursor || loadingMore) return;
@@ -996,6 +1190,7 @@ function Feed() {
                   logout();
                   setMenuOpen(false);
                 }}
+                onDeleteAccount={confirmDeleteAccount}
                 onSettings={() => {
                   setSettingsOpen(true);
                   setMenuOpen(false);
@@ -1021,17 +1216,35 @@ function Feed() {
                   style={styles.chipRow}
                   contentContainerStyle={styles.chipRowContent}
                 >
-                  <Chip label="All" active={!category} onPress={() => setCategory(undefined)} />
-                  {CATEGORIES.map((c) => (
+                  <Chip label="All" active={!category} onPress={() => onCategoryPress(undefined)} />
+                  {categories.map((c) => (
                     <Chip
                       key={c}
                       label={c}
                       active={category === c}
-                      onPress={() => setCategory(category === c ? undefined : c)}
+                      onPress={() => onCategoryPress(c)}
                     />
                   ))}
                 </ScrollView>
-                <Pressable style={styles.searchToggle} onPress={openSearch} hitSlop={8}>
+                {/* Right-edge gradient so chips fade into the header as they reach
+                    the search button, instead of being sharply cut off. */}
+                <View pointerEvents="none" style={styles.chipFade}>
+                  {FADE_STEPS.map((op, i) => (
+                    <View
+                      key={i}
+                      style={[styles.chipFadeStep, { backgroundColor: hexToRgba(colors.surface, op) }]}
+                    />
+                  ))}
+                </View>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.searchToggle,
+                    styles.searchToggleFeed,
+                    pressed && styles.searchTogglePressed,
+                  ]}
+                  onPress={openSearch}
+                  hitSlop={8}
+                >
                   <Ionicons name="search" size={18} color={colors.icon} />
                 </Pressable>
               </>
@@ -1053,7 +1266,14 @@ function Feed() {
               <>
                 <Text style={styles.subHeaderTitle}>{tab === 'saved' ? 'Saved' : 'History'}</Text>
                 {tab === 'read' ? (
-                  <Pressable style={styles.searchToggle} onPress={openSearch} hitSlop={8}>
+                  <Pressable
+                    style={({ pressed }) => [
+                      styles.searchToggle,
+                      pressed && styles.searchTogglePressed,
+                    ]}
+                    onPress={openSearch}
+                    hitSlop={8}
+                  >
                     <Ionicons name="search" size={18} color={colors.icon} />
                   </Pressable>
                 ) : null}
@@ -1084,6 +1304,7 @@ function Feed() {
                 </View>
               ) : (
                 <CardList
+                  ref={feedListRef}
                   data={feedData}
                   feedHeight={feedHeight}
                   savedIds={savedIds}
@@ -1270,9 +1491,28 @@ function makeStyles(c: Palette) {
     },
     backBtnText: { fontSize: 13, color: c.textStrong, fontWeight: '600' },
     subHeaderTitle: { flex: 1, fontSize: 16, fontWeight: '700', color: c.text },
-    filterRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, gap: 8, zIndex: 30 },
+    filterRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      marginTop: 8,
+      minHeight: 36,
+      position: 'relative',
+      zIndex: 30,
+    },
     chipRow: { flex: 1 },
-    chipRowContent: { alignItems: 'center' },
+    // Extra right padding lets the last chip scroll fully clear of the fade +
+    // search button (which are pinned over the row's right edge).
+    chipRowContent: { alignItems: 'center', paddingRight: 52 },
+    // Soft transparent→surface gradient sitting just left of the search button.
+    chipFade: {
+      position: 'absolute',
+      right: 32,
+      top: 0,
+      bottom: 0,
+      width: 40,
+      flexDirection: 'row',
+    },
+    chipFadeStep: { flex: 1 },
     chip: {
       paddingVertical: 6,
       paddingHorizontal: 12,
@@ -1284,16 +1524,20 @@ function makeStyles(c: Palette) {
     chipText: { fontSize: 13, color: c.textStrong, textTransform: 'capitalize' },
     chipTextOn: { color: c.primaryText },
     // Search
+    // Borderless icon button (modern iOS/Material style): no visible ring — the
+    // fill matches the header surface so it reads as the icon floating on the bar,
+    // with the chip-row fade dissolving chips into it. Press state gives feedback.
     searchToggle: {
       width: 36,
       height: 36,
       borderRadius: 18,
-      backgroundColor: c.surfaceMuted,
-      borderWidth: 1,
-      borderColor: c.border,
+      backgroundColor: c.surface,
       alignItems: 'center',
       justifyContent: 'center',
     },
+    searchTogglePressed: { backgroundColor: c.surfaceMuted },
+    // Feed variant: pinned to the row's right edge so chips scroll behind it.
+    searchToggleFeed: { position: 'absolute', right: 0 },
     searchBar: {
       flex: 1,
       flexDirection: 'row',
@@ -1393,7 +1637,6 @@ function makeStyles(c: Palette) {
       alignItems: 'center',
       justifyContent: 'center',
     },
-    readCtaArrow: { fontSize: 18, color: '#ffffff', fontWeight: '700' },
     // Modals (auth + settings)
     modalOverlay: {
       position: 'absolute',

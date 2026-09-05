@@ -4,17 +4,21 @@
 // (middleware.ts) and Node (server actions) — so one implementation covers both.
 //
 // Token format: "<expiryMs>.<base64url(HMAC-SHA256(expiryMs))>".
-// The signature is keyed on ADMIN_PASSWORD, so changing the password
-// immediately invalidates every existing session.
+// The signature is keyed on ADMIN_TOKEN (the service secret this panel shares
+// with the API). Operators authenticate with an email + password verified
+// against the admin_users table; this token only proves an authenticated
+// session afterwards. Rotating ADMIN_TOKEN invalidates every existing session.
 
 export const SESSION_COOKIE = 'aishorts_admin_session';
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days — convenient on a phone
 
 const encoder = new TextEncoder();
 
-export function adminPassword(): string | null {
-  const pw = process.env.ADMIN_PASSWORD;
-  return pw && pw.length > 0 ? pw : null;
+// The HMAC signing secret for session cookies. Keyed on ADMIN_TOKEN so it's
+// shared with the API and independent of any single operator's password.
+export function sessionSecret(): string | null {
+  const t = process.env.ADMIN_TOKEN;
+  return t && t.length > 0 ? t : null;
 }
 
 async function hmacKey(secret: string): Promise<CryptoKey> {

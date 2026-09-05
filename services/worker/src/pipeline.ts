@@ -1,11 +1,16 @@
 import { ingest } from './ingest';
 import { summarizePending } from './summarize';
 
+// Re-export so the API (which imports the worker package's main entry) can
+// validate/preview a feed URL before an operator adds it as a source.
+export { previewFeed, type FeedPreview } from './ingest';
+
 export type PipelineResult = {
   fetched: number; // articles seen across all feeds
-  inserted: number; // new raw articles stored (after dedup)
+  inserted: number; // new raw articles stored (after dedup + AI topic filter)
   created: number; // draft cards written
   skipped: number; // articles the summarizer couldn't process
+  filtered: number; // articles dropped as not AI-related (ingest + summarize)
 };
 
 // The full content pipeline: pull feeds -> summarize the freshest new articles
@@ -22,11 +27,12 @@ export async function runPipeline(
   };
 
   step('Fetching RSS sources…');
-  const { fetched, inserted } = await ingest();
+  const { fetched, inserted, filtered: ingestFiltered } = await ingest();
 
   step(`Found ${inserted} new article(s) of ${fetched} seen. Summarizing…`);
-  const { created, skipped } = await summarizePending(25, onProgress);
+  const { created, skipped, filtered: summarizeFiltered } = await summarizePending(25, onProgress);
 
+  const filtered = ingestFiltered + summarizeFiltered;
   step(`Done — ${created} new draft card(s) ready for review.`);
-  return { fetched, inserted, created, skipped };
+  return { fetched, inserted, created, skipped, filtered };
 }

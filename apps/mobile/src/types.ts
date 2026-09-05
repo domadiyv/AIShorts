@@ -4,7 +4,6 @@ export type Card = {
   summary: string;
   whyItMatters: string | null;
   category: string;
-  difficulty: string;
   tags: string[];
   imageUrl: string | null;
   sourceName: string;

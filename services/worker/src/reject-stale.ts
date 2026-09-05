@@ -10,7 +10,7 @@ import { prisma } from '@aishorts/shared';
 //   npm run -w @aishorts/worker reject:stale -- --yes # actually reject
 //
 // Tune the window with MAX_ARTICLE_AGE_DAYS (same variable the summarizer uses).
-const MAX_ARTICLE_AGE_DAYS = Number(process.env.MAX_ARTICLE_AGE_DAYS ?? 21);
+const MAX_ARTICLE_AGE_DAYS = Number(process.env.MAX_ARTICLE_AGE_DAYS ?? 30);
 
 async function main() {
   const apply = process.argv.includes('--yes');

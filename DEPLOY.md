@@ -94,6 +94,55 @@ runtime via the app's **Settings** screen). Verify from off-network:
 curl -s https://<tunnel-host>/v1/feed?limit=1
 ```
 
+### 2.1 Always-on tunnels (survive reboots) — API + admin
+
+`scripts/tunnel.sh` runs in the foreground and dies when the terminal closes. For a
+persistent setup that exposes **both** the API (:4000) and the admin panel (:4001) and
+restarts itself on crash/reboot, run each `cloudflared` as a macOS **LaunchAgent**.
+
+Two things to know about this network/setup:
+
+- **Use `--protocol http2`.** cloudflared prefers QUIC (UDP 7844); if outbound UDP 7844
+  is blocked, the tunnel flaps or never connects. `--protocol http2` forces TCP 7844,
+  which works. Symptom in the logs: `Failed to refresh DNS local resolver` / `Lost
+  connection with the edge` loops.
+- **Expose the admin over a tunnel only in production mode.** `next dev` doesn't hydrate
+  behind a proxy (buttons/toggles go dead though the page renders); docker-compose already
+  runs admin via `next build && next start` for this reason.
+
+Each LaunchAgent (`~/Library/LaunchAgents/com.aishorts.tunnel.{api,admin}.plist`) runs, e.g.:
+
+```
+/opt/homebrew/bin/cloudflared tunnel --no-autoupdate --protocol http2 --url http://localhost:4000
+```
+
+with `RunAtLoad` + `KeepAlive` true and logs to `~/.aishorts-tunnels/{api,admin}.log`.
+
+**Daily operation:**
+
+```bash
+scripts/tunnel-status.sh            # print current URLs + reachability + agent status
+
+# get the current public URLs (quick tunnels rotate on every restart):
+grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' ~/.aishorts-tunnels/api.log   | tail -1
+grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' ~/.aishorts-tunnels/admin.log | tail -1
+
+# restart a tunnel (also mints a NEW random URL):
+launchctl kickstart -k gui/$(id -u)/com.aishorts.tunnel.api
+launchctl kickstart -k gui/$(id -u)/com.aishorts.tunnel.admin
+
+# load / unload the agents:
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.aishorts.tunnel.api.plist
+launchctl bootout   gui/$(id -u)/com.aishorts.tunnel.api
+```
+
+> **Quick-tunnel URLs are not stable.** Every cloudflared restart (crash, reboot, manual
+> kickstart) yields a new `*.trycloudflare.com` host, so you must re-enter the API URL in
+> the app's **Settings → Server settings** afterward. For a URL that never changes, use a
+> **named** Cloudflare tunnel (needs a Cloudflare account + a domain on Cloudflare):
+> `cloudflared tunnel login`, create the tunnel, add DNS routes (`api.example.com`,
+> `admin.example.com`), then `scripts/tunnel.sh <name>`.
+
 ---
 
 ## 3. Build the Android APK (local, no EAS)

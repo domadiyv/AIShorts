@@ -1,6 +1,8 @@
-// Seed AI news/research sources. These are upserted into the `sources` table
-// on each run, so the DB is the source of truth and this list can grow.
-// Only official/public RSS feeds — we summarize + link back, never republish.
+// Default AI news/research sources, used to seed the `sources` table ONLY when
+// it is empty (a fresh database). After first boot the DB is the source of truth
+// — operator add/deletes in the admin panel are authoritative and are never
+// overwritten from this list. Only official/public RSS feeds — we summarize +
+// link back, never republish.
 export interface SeedSource {
   name: string;
   url: string;

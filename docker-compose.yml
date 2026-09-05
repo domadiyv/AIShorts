@@ -78,9 +78,13 @@ services:
     ports:
       - "4001:4001"
     restart: unless-stopped
-    # Runs the Next.js panel in dev mode (matches local workflow; avoids build-time
-    # static-generation against a not-yet-running API).
-    command: ["sh", "-lc", "cd apps/admin && npx next dev -p 4001 -H 0.0.0.0"]
+    # Runs the Next.js panel in PRODUCTION mode. Dev mode (`next dev`) relies on an
+    # HMR websocket and dev-only response streaming that don't survive a public
+    # proxy/tunnel, which breaks client hydration (buttons/toggles go dead) even
+    # though the server-rendered HTML looks fine. Building at container start is
+    # safe here: the API is already up (depends_on) and the pages are dynamic
+    # (they read cookies + searchParams), so no build-time fetch to the API.
+    command: ["sh", "-lc", "cd apps/admin && npx next build && npx next start -p 4001 -H 0.0.0.0"]
 
   # Manual RSS ingest + summarize. Not a long-running service; invoke on demand:
   #   docker compose --profile jobs run --rm worker
@@ -99,6 +103,22 @@ services:
       - media:/app/services/api/media
     entrypoint: ["sh", "-lc"]
     command: ["npx tsx services/worker/src/index.ts"]
+
+  # Always-on scheduler: fires the purge job daily at 00:00 IST (archives cards
+  # whose article is older than PURGE_AGE_DAYS and frees their image bytes). Comes
+  # up with the normal stack (no profile) and Docker restarts it after a reboot, so
+  # the schedule needs no host cron/launchd. Tune PURGE_AGE_DAYS in .env.
+  scheduler:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      DATABASE_URL: *db-url
+    entrypoint: ["sh", "-lc"]
+    command: ["npx tsx services/worker/src/scheduler.ts"]
 
 volumes:
   pgdata:

@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { apiGoogle, apiLogin, apiRegister, type AuthUser } from './api';
+import * as SecureStore from 'expo-secure-store';
+import { apiDeleteAccount, apiGoogle, apiLogin, apiRegister, type AuthUser } from './api';
 
 // Real Google Sign-In (native). expo-auth-session's Google provider is deprecated
 // in SDK 54; Google/Expo now recommend this library. It needs a native build
@@ -17,8 +18,40 @@ const GOOGLE_WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID ?? '';
 const googleConfigured = GOOGLE_WEB_CLIENT_ID.length > 0 && Platform.OS !== 'web';
 
 // Persist the session so the user stays logged in across app restarts.
+// The bearer token is a credential, so it lives in the OS keychain/keystore via
+// expo-secure-store (SecureStore) rather than plaintext AsyncStorage. The user
+// profile (non-sensitive display data) stays in AsyncStorage.
 const TOKEN_KEY = 'aishorts.auth.token.v1';
 const USER_KEY = 'aishorts.auth.user.v1';
+
+// SecureStore isn't available on web — fall back to AsyncStorage there.
+const secureAvailable = Platform.OS !== 'web';
+
+async function saveToken(token: string): Promise<void> {
+  if (secureAvailable) await SecureStore.setItemAsync(TOKEN_KEY, token);
+  else await AsyncStorage.setItem(TOKEN_KEY, token);
+}
+
+async function loadToken(): Promise<string | null> {
+  if (!secureAvailable) return AsyncStorage.getItem(TOKEN_KEY);
+  const secure = await SecureStore.getItemAsync(TOKEN_KEY).catch(() => null);
+  if (secure) return secure;
+  // One-time migration: move a token written by an older build (plaintext
+  // AsyncStorage) into SecureStore, then delete the plaintext copy.
+  const legacy = await AsyncStorage.getItem(TOKEN_KEY).catch(() => null);
+  if (legacy) {
+    await SecureStore.setItemAsync(TOKEN_KEY, legacy).catch(() => {});
+    await AsyncStorage.removeItem(TOKEN_KEY).catch(() => {});
+    return legacy;
+  }
+  return null;
+}
+
+async function clearToken(): Promise<void> {
+  if (secureAvailable) await SecureStore.deleteItemAsync(TOKEN_KEY).catch(() => {});
+  // Always also clear any legacy plaintext copy.
+  await AsyncStorage.removeItem(TOKEN_KEY).catch(() => {});
+}
 
 type AuthContextValue = {
   user: AuthUser | null;
@@ -28,6 +61,7 @@ type AuthContextValue = {
   login: (email: string, password: string) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
+  deleteAccount: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -86,6 +120,22 @@ async function nativeGoogleIdToken(): Promise<string | null> {
   throw new Error('google_cancelled');
 }
 
+// Clear Google's cached device session so a later sign-in shows the account
+// picker again (our own logout is otherwise client-only, and Google Play Services
+// would silently re-use the last account). Best-effort: a no-op when the native
+// module isn't available (web/Expo Go) or Google isn't configured.
+async function nativeGoogleSignOut(): Promise<void> {
+  if (!googleConfigured) return;
+  let mod: typeof import('@react-native-google-signin/google-signin');
+  try {
+    mod = require('@react-native-google-signin/google-signin');
+  } catch {
+    return;
+  }
+  configureGoogle(mod);
+  await mod.GoogleSignin.signOut().catch(() => {});
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -95,10 +145,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     (async () => {
       try {
-        const [t, u] = await Promise.all([
-          AsyncStorage.getItem(TOKEN_KEY),
-          AsyncStorage.getItem(USER_KEY),
-        ]);
+        const [t, u] = await Promise.all([loadToken(), AsyncStorage.getItem(USER_KEY)]);
         if (t && u) {
           setToken(t);
           setUser(JSON.parse(u) as AuthUser);
@@ -114,10 +161,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const persist = useCallback(async (res: { token: string; user: AuthUser }) => {
     setToken(res.token);
     setUser(res.user);
-    await AsyncStorage.multiSet([
-      [TOKEN_KEY, res.token],
-      [USER_KEY, JSON.stringify(res.user)],
-    ]);
+    await Promise.all([saveToken(res.token), AsyncStorage.setItem(USER_KEY, JSON.stringify(res.user))]);
   }, []);
 
   const register = useCallback(
@@ -145,12 +189,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(async () => {
     setToken(null);
     setUser(null);
-    await AsyncStorage.multiRemove([TOKEN_KEY, USER_KEY]);
+    // Also sign out of Google so the next "Continue with Google" prompts for an
+    // account instead of silently re-using the last one.
+    await Promise.all([nativeGoogleSignOut(), clearToken(), AsyncStorage.removeItem(USER_KEY)]);
   }, []);
 
+  // Permanently delete the account server-side, then clear the local session.
+  // Throws if the server call fails so the caller can surface the error and keep
+  // the user signed in.
+  const deleteAccount = useCallback(async () => {
+    if (token) await apiDeleteAccount(token);
+    setToken(null);
+    setUser(null);
+    await Promise.all([nativeGoogleSignOut(), clearToken(), AsyncStorage.removeItem(USER_KEY)]);
+  }, [token]);
+
   const value = useMemo<AuthContextValue>(
-    () => ({ user, token, loading, register, login, signInWithGoogle, logout }),
-    [user, token, loading, register, login, signInWithGoogle, logout],
+    () => ({ user, token, loading, register, login, signInWithGoogle, logout, deleteAccount }),
+    [user, token, loading, register, login, signInWithGoogle, logout, deleteAccount],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
