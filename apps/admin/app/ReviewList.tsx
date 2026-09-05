@@ -49,6 +49,10 @@ export function ReviewList({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
   const [msg, setMsg] = useState<{ text: string; err?: boolean } | null>(null);
+  // Inline confirm for "Approve all" — a two-click guard instead of window.confirm,
+  // which some embedded/in-app browsers suppress (it returns false with no dialog,
+  // so the native-confirm version silently did nothing).
+  const [confirmingAll, setConfirmingAll] = useState(false);
 
   const allIds = useMemo(() => cards.map((c) => c.id), [cards]);
   const allSelected = selected.size > 0 && selected.size === cards.length;
@@ -112,18 +116,38 @@ export function ReviewList({
             >
               Reject selected
             </button>
-            <button
-              type="button"
-              className="btn-approve-all"
-              disabled={pending}
-              onClick={() => {
-                if (window.confirm(`Approve and publish all ${cards.length} pending card(s)?`)) {
-                  run('Approved', approveCards, allIds);
-                }
-              }}
-            >
-              Approve all ({cards.length})
-            </button>
+            {confirmingAll ? (
+              <>
+                <button
+                  type="button"
+                  className="btn-approve-all"
+                  disabled={pending}
+                  onClick={() => {
+                    setConfirmingAll(false);
+                    run('Approved', approveCards, allIds);
+                  }}
+                >
+                  Confirm approve all ({cards.length})
+                </button>
+                <button
+                  type="button"
+                  className="btn-save"
+                  disabled={pending}
+                  onClick={() => setConfirmingAll(false)}
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="btn-approve-all"
+                disabled={pending}
+                onClick={() => setConfirmingAll(true)}
+              >
+                Approve all ({cards.length})
+              </button>
+            )}
           </div>
           {msg && (
             <span className={`bulk-msg${msg.err ? ' bulk-err' : ' bulk-ok'}`}>{msg.text}</span>
